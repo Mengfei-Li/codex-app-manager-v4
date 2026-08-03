@@ -431,6 +431,8 @@ export interface MsixHealthReport {
  * Outcome of `win_perform_update`. Enumerates the exact action strings the
  * backend sets in src-tauri/src/app/win_update.rs:
  *   - "none"                                   — already up to date.
+ *   - "official-web-installer"                 — Microsoft-signed online
+ *                                                installer passed launch health.
  *   - "msix-sideload"                          — MSIX sideload succeeded.
  *   - "portable-fallback"                      — user chose portable mode.
  *   - "portable-fallback-after-msix-failure"   — sideload failed, fell back.
@@ -441,6 +443,7 @@ export interface MsixHealthReport {
  */
 export type WinPerformAction =
   | "none"
+  | "official-web-installer"
   | "msix-sideload"
   | "portable-fallback"
   | "portable-fallback-after-msix-failure"
@@ -453,6 +456,7 @@ export interface WinPerformReport {
   message: string;
   stage: WinStageReport;
   sideload: MsixSideloadReport | null;
+  webInstaller: WinWebInstallerReport | null;
   portable: PortableInstallReport | null;
   msixHealth: MsixHealthReport | null;
   installed: InstalledWindowsCodex | null;
@@ -460,6 +464,21 @@ export interface WinPerformReport {
   fallbackAttempted: boolean;
   notes: string[];
   outcome: OperationOutcome;
+}
+
+export interface WebInstallerExecution {
+  success: boolean;
+  exitCode: number | null;
+  message: string;
+  stdout: string;
+  stderr: string;
+}
+
+export interface WinWebInstallerReport {
+  url: string;
+  authenticode: AuthenticodeReport;
+  execution: WebInstallerExecution;
+  health: MsixHealthReport;
 }
 
 export interface PortableInstallReport {

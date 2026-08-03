@@ -9,6 +9,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use fs4::{FileExt as Fs4FileExt, TryLockError};
 
 use crate::app::op_phase::{OperationPhase, QuitPolicy};
+use crate::app::operation_journal::{
+    JournalEvidence, JournalProgress, JournalStatus, OperationJournal, OperationJournalStore,
+    OPERATION_JOURNAL_SCHEMA_VERSION,
+};
 
 static TOKEN_COUNTER: AtomicU64 = AtomicU64::new(1);
 const DEFAULT_STALE_AFTER_SECS: u64 = 5 * 60;
@@ -61,6 +65,9 @@ struct Inner {
     active: Option<ActiveOp>,
     completed: VecDeque<OperationCompletion>,
     lock_file: Result<File, String>,
+    journal: OperationJournalStore,
+    journal_sequence: u64,
+    last_attempt: u32,
 }
 
 /// Byte-transfer progress mirrored into the active lease so a reloaded
@@ -141,6 +148,8 @@ struct ActiveOp {
     progress: Option<OperationProgress>,
     /// True after a pause was requested while the lease is still held.
     paused: bool,
+    attempt: u32,
+    last_error: Option<String>,
 }
 
 #[must_use = "持有 guard 才代表持有操作锁；提前 drop 会立即释放锁"]
@@ -170,6 +179,7 @@ impl Drop for OperationGuard {
             .as_ref()
             .is_some_and(|active| active.token == self.token.0)
         {
+            OperationManager::persist_terminal(&mut inner, JournalStatus::Released, None);
             let _ = OperationManager::unlock_lock_file(&mut inner);
             // Linearize latch cleanup with removal of the owning lease. A cancel
             // command takes the same mutex for both snapshots, so it either sees
@@ -192,12 +202,23 @@ impl OperationManager {
     }
 
     fn new_with_stale_after(lock_path: PathBuf, stale_after_secs: u64) -> Self {
+        let journal_path = lock_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("operation-journal.json");
+        let journal = OperationJournalStore::new(journal_path);
+        let previous = journal.load().0;
+        let journal_sequence = previous.as_ref().map(|value| value.sequence).unwrap_or(0);
+        let last_attempt = previous.as_ref().map(|value| value.attempt).unwrap_or(0);
         let lock_file = Self::open_lock_file(&lock_path);
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 active: None,
                 completed: VecDeque::new(),
                 lock_file,
+                journal,
+                journal_sequence,
+                last_attempt,
             })),
             stale_after_secs,
         }
@@ -239,6 +260,7 @@ impl OperationManager {
                     );
                     return Ok(());
                 }
+                Self::persist_terminal(&mut inner, JournalStatus::Released, None);
                 Self::unlock_lock_file(&mut inner)?;
                 clear_cancel_latches();
                 log::info!(
@@ -303,6 +325,7 @@ impl OperationManager {
                     );
                     active.phase = phase;
                 }
+                Self::persist_active(&mut inner);
                 return Ok(());
             }
         }
@@ -380,6 +403,7 @@ impl OperationManager {
             );
             active.phase = phase;
         }
+        Self::persist_active(&mut inner);
         Ok(())
     }
 
@@ -406,16 +430,14 @@ impl OperationManager {
         // Any later mutation invalidates rollback evidence from an earlier
         // attempt in the same operation.
         active.mutation_rolled_back = false;
+        Self::persist_active(&mut inner);
         Ok(())
     }
 
     /// Record positive evidence that every observed portable install-root
     /// mutation was restored. This does not clear `outcome_ambiguous`: a prior
     /// platform call such as Add-AppxPackage may still have changed system state.
-    pub fn mark_mutation_rolled_back(
-        &self,
-        token: &OperationToken,
-    ) -> Result<(), OperationError> {
+    pub fn mark_mutation_rolled_back(&self, token: &OperationToken) -> Result<(), OperationError> {
         let mut inner = self
             .inner
             .lock()
@@ -437,6 +459,7 @@ impl OperationManager {
             );
             active.mutation_rolled_back = true;
         }
+        Self::persist_active(&mut inner);
         Ok(())
     }
 
@@ -461,6 +484,7 @@ impl OperationManager {
             );
             active.outcome_ambiguous = true;
         }
+        Self::persist_active(&mut inner);
         Ok(())
     }
 
@@ -636,6 +660,7 @@ impl OperationManager {
         let requested = request();
         if requested {
             active.paused = true;
+            Self::persist_active(&mut inner);
         }
         requested
     }
@@ -678,6 +703,17 @@ impl OperationManager {
         while inner.completed.len() > COMPLETION_HISTORY_LIMIT {
             inner.completed.pop_front();
         }
+        let status = match completion.state {
+            OperationCompletionState::Succeeded => JournalStatus::Succeeded,
+            OperationCompletionState::FailedBeforeCommit => JournalStatus::FailedBeforeCommit,
+            OperationCompletionState::RolledBack => JournalStatus::RolledBack,
+            OperationCompletionState::OutcomeUnknown => JournalStatus::OutcomeUnknown,
+        };
+        let default_error = (!succeeded).then(|| {
+            "operation failed; see structured application logs for the complete error chain"
+                .to_string()
+        });
+        Self::persist_terminal(&mut inner, status, default_error);
         Ok(completion)
     }
 
@@ -712,16 +748,13 @@ impl OperationManager {
         // Bytes flowing again means we're no longer in a paused UI state.
         active.paused = false;
         active.progress = Some(progress);
+        Self::persist_active(&mut inner);
         Ok(())
     }
 
     /// Mark the active op as paused (or clear the flag). Used when the UI
     /// requests pause so a reloaded frontend can restore the paused screen.
-    pub fn set_paused(
-        &self,
-        token: &OperationToken,
-        paused: bool,
-    ) -> Result<(), OperationError> {
+    pub fn set_paused(&self, token: &OperationToken, paused: bool) -> Result<(), OperationError> {
         let mut inner = self
             .inner
             .lock()
@@ -733,6 +766,7 @@ impl OperationManager {
             return Err(OperationError::InvalidToken);
         }
         active.paused = paused;
+        Self::persist_active(&mut inner);
         Ok(())
     }
 
@@ -773,6 +807,8 @@ impl OperationManager {
         // Attached guards are claimed immediately; detached tokens stay unclaimed
         // until the first successful `validate` (DetachedGuard path).
         let claimed = !detached;
+        inner.last_attempt = inner.last_attempt.saturating_add(1);
+        let attempt = inner.last_attempt;
         inner.active = Some(ActiveOp {
             token: token.0.clone(),
             kind,
@@ -786,7 +822,10 @@ impl OperationManager {
             outcome_ambiguous: false,
             progress: None,
             paused: false,
+            attempt,
+            last_error: None,
         });
+        Self::persist_active(&mut inner);
         log::info!(
             "acquired operation lock kind={} token_prefix={} detached={detached} claimed={claimed}",
             kind.as_str(),
@@ -836,10 +875,53 @@ impl OperationManager {
                 active.kind.as_str()
             );
             Self::unlock_lock_file(inner)?;
+            Self::persist_terminal(
+                inner,
+                JournalStatus::Abandoned,
+                Some(
+                    "unclaimed detached operation lease expired before a worker claimed it"
+                        .to_string(),
+                ),
+            );
             clear_cancel_latches();
             inner.active.take();
         }
         Ok(())
+    }
+
+    fn next_sequence(inner: &mut Inner) -> u64 {
+        inner.journal_sequence = inner.journal_sequence.saturating_add(1);
+        inner.journal_sequence
+    }
+
+    fn persist_active(inner: &mut Inner) {
+        let Some(active) = inner.active.as_ref() else {
+            return;
+        };
+        let active = ActiveJournalSnapshot::from(active);
+        let sequence = Self::next_sequence(inner);
+        let record = active.into_journal(sequence, JournalStatus::Active, None);
+        if let Err(error) = inner.journal.write(&record) {
+            log::error!(
+                "failed to persist operation journal path={} error={error}",
+                inner.journal.path().display()
+            );
+        }
+    }
+
+    fn persist_terminal(inner: &mut Inner, status: JournalStatus, last_error: Option<String>) {
+        let Some(active) = inner.active.as_ref() else {
+            return;
+        };
+        let active = ActiveJournalSnapshot::from(active);
+        let sequence = Self::next_sequence(inner);
+        let record = active.into_journal(sequence, status, last_error);
+        if let Err(error) = inner.journal.write(&record) {
+            log::error!(
+                "failed to persist terminal operation journal path={} error={error}",
+                inner.journal.path().display()
+            );
+        }
     }
 
     /// Only unclaimed detached tokens expire by wall-clock age.
@@ -850,6 +932,73 @@ impl OperationManager {
                 && !active.claimed
                 && now_unix().saturating_sub(active.started_unix) >= self.stale_after_secs
         })
+    }
+}
+
+#[derive(Clone)]
+struct ActiveJournalSnapshot {
+    token: String,
+    kind: OperationKind,
+    started_unix: u64,
+    phase: OperationPhase,
+    mutation_started: bool,
+    mutation_rolled_back: bool,
+    outcome_ambiguous: bool,
+    progress: Option<OperationProgress>,
+    paused: bool,
+    attempt: u32,
+    last_error: Option<String>,
+}
+
+impl From<&ActiveOp> for ActiveJournalSnapshot {
+    fn from(active: &ActiveOp) -> Self {
+        Self {
+            token: active.token.clone(),
+            kind: active.kind,
+            started_unix: active.started_unix,
+            phase: active.phase,
+            mutation_started: active.mutation_started,
+            mutation_rolled_back: active.mutation_rolled_back,
+            outcome_ambiguous: active.outcome_ambiguous,
+            progress: active.progress.clone(),
+            paused: active.paused,
+            attempt: active.attempt,
+            last_error: active.last_error.clone(),
+        }
+    }
+}
+
+impl ActiveJournalSnapshot {
+    fn into_journal(
+        self,
+        sequence: u64,
+        status: JournalStatus,
+        last_error: Option<String>,
+    ) -> OperationJournal {
+        OperationJournal {
+            schema_version: OPERATION_JOURNAL_SCHEMA_VERSION,
+            sequence,
+            operation_id: self.token,
+            kind: self.kind.as_str().to_string(),
+            status,
+            phase: self.phase.as_str().to_string(),
+            started_unix: self.started_unix,
+            heartbeat_unix: now_unix(),
+            attempt: self.attempt,
+            pid: std::process::id(),
+            progress: self.progress.map(|progress| JournalProgress {
+                downloaded: progress.downloaded,
+                total: progress.total,
+                source: progress.source,
+            }),
+            paused: self.paused,
+            evidence: JournalEvidence {
+                mutation_started: self.mutation_started,
+                mutation_rolled_back: self.mutation_rolled_back,
+                outcome_ambiguous: self.outcome_ambiguous,
+            },
+            last_error: last_error.or(self.last_error),
+        }
     }
 }
 
@@ -1151,10 +1300,7 @@ mod tests {
             }
         ));
         // Force quit still wins.
-        assert_eq!(
-            manager.quit_policy(true, true),
-            QuitPolicy::Allow
-        );
+        assert_eq!(manager.quit_policy(true, true), QuitPolicy::Allow);
 
         manager.end(token).unwrap();
         assert_eq!(manager.phase(), OperationPhase::Idle);
@@ -1164,8 +1310,8 @@ mod tests {
 
     #[test]
     fn snapshot_exposes_progress_phase_and_flags() {
-        use crate::app::op_phase::OperationPhase;
         use super::OperationProgress;
+        use crate::app::op_phase::OperationPhase;
 
         let path = lock_path("snapshot");
         let manager = OperationManager::new(path.clone());
@@ -1523,9 +1669,7 @@ mod tests {
 
         let ambiguous_rollback = manager.begin_detached(OperationKind::Update).unwrap();
         manager.validate(&ambiguous_rollback).unwrap();
-        manager
-            .mark_outcome_ambiguous(&ambiguous_rollback)
-            .unwrap();
+        manager.mark_outcome_ambiguous(&ambiguous_rollback).unwrap();
         manager.mark_mutation_started(&ambiguous_rollback).unwrap();
         manager
             .mark_mutation_rolled_back(&ambiguous_rollback)
@@ -1538,11 +1682,15 @@ mod tests {
 
         let mutation_after_rollback = manager.begin_detached(OperationKind::Update).unwrap();
         manager.validate(&mutation_after_rollback).unwrap();
-        manager.mark_mutation_started(&mutation_after_rollback).unwrap();
+        manager
+            .mark_mutation_started(&mutation_after_rollback)
+            .unwrap();
         manager
             .mark_mutation_rolled_back(&mutation_after_rollback)
             .unwrap();
-        manager.mark_mutation_started(&mutation_after_rollback).unwrap();
+        manager
+            .mark_mutation_started(&mutation_after_rollback)
+            .unwrap();
         let completion = manager
             .record_completion(&mutation_after_rollback, false)
             .unwrap();
@@ -1551,9 +1699,7 @@ mod tests {
 
         let ambiguous_call = manager.begin_detached(OperationKind::Update).unwrap();
         manager.validate(&ambiguous_call).unwrap();
-        manager
-            .mark_outcome_ambiguous(&ambiguous_call)
-            .unwrap();
+        manager.mark_outcome_ambiguous(&ambiguous_call).unwrap();
         let completion = manager.record_completion(&ambiguous_call, false).unwrap();
         assert_eq!(completion.state, OperationCompletionState::OutcomeUnknown);
         manager.end(ambiguous_call.clone()).unwrap();

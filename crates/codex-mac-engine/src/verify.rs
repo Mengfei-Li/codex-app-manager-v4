@@ -24,10 +24,9 @@ fn verifying_key_from_b64(b64: &str) -> Result<VerifyingKey, EngineError> {
     let bytes = B64
         .decode(b64.trim())
         .map_err(|e| EngineError::Verify(format!("pubkey base64: {e}")))?;
-    let arr: [u8; 32] = bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| EngineError::Verify(format!("pubkey must be 32 bytes, got {}", bytes.len())))?;
+    let arr: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
+        EngineError::Verify(format!("pubkey must be 32 bytes, got {}", bytes.len()))
+    })?;
     VerifyingKey::from_bytes(&arr).map_err(|e| EngineError::Verify(format!("pubkey: {e}")))
 }
 
@@ -57,7 +56,10 @@ pub fn verify_with(
         .decode(ed_signature_b64.trim())
         .map_err(|e| EngineError::Verify(format!("signature base64: {e}")))?;
     let arr: [u8; 64] = sig_bytes.as_slice().try_into().map_err(|_| {
-        EngineError::Verify(format!("signature must be 64 bytes, got {}", sig_bytes.len()))
+        EngineError::Verify(format!(
+            "signature must be 64 bytes, got {}",
+            sig_bytes.len()
+        ))
     })?;
     let sig = Signature::from_bytes(&arr);
     key.verify_strict(message, &sig)

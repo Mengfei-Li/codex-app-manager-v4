@@ -11,6 +11,7 @@ use std::process::Command;
 
 use crate::limits::MAX_TEXT_BYTES;
 use crate::network::NetworkConfig;
+use crate::process::{run_capturing, RunLimits};
 use crate::EngineError;
 
 const CURL: &str = "/usr/bin/curl";
@@ -47,23 +48,26 @@ pub fn fetch_text_with_network(url: &str, network: &NetworkConfig) -> Result<Str
     let max_text = MAX_TEXT_BYTES.to_string();
     let mut command = Command::new(CURL);
     network.apply_to_command(&mut command);
-    let output = command
-        .args([
-            "-fsSL",
-            "--proto",
-            "=https",
-            "--proto-redir",
-            "=https",
-            "--connect-timeout",
-            "20",
-            "--max-time",
-            "60",
-            "--max-filesize",
-            &max_text,
-            url,
-        ])
-        .output()
-        .map_err(|e| EngineError::Io(format!("spawn curl: {e}")))?;
+    command.args([
+        "-fsSL",
+        "--proto",
+        "=https",
+        "--proto-redir",
+        "=https",
+        "--connect-timeout",
+        "20",
+        "--max-time",
+        "60",
+        "--max-filesize",
+        &max_text,
+        url,
+    ]);
+    let output = run_capturing(
+        command,
+        RunLimits::total(std::time::Duration::from_secs(70)),
+        None,
+    )
+    .map_err(|e| EngineError::Io(format!("run curl: {}", e.message())))?;
 
     text_from_curl(url, output)
 }
@@ -83,23 +87,26 @@ pub fn fetch_text_timeout_with_network(
     let max_text = MAX_TEXT_BYTES.to_string();
     let mut command = Command::new(CURL);
     network.apply_to_command(&mut command);
-    let output = command
-        .args([
-            "-fsSL",
-            "--proto",
-            "=https",
-            "--proto-redir",
-            "=https",
-            "--connect-timeout",
-            "5",
-            "--max-time",
-            &max_secs.to_string(),
-            "--max-filesize",
-            &max_text,
-            url,
-        ])
-        .output()
-        .map_err(|e| EngineError::Io(format!("spawn curl: {e}")))?;
+    command.args([
+        "-fsSL",
+        "--proto",
+        "=https",
+        "--proto-redir",
+        "=https",
+        "--connect-timeout",
+        "5",
+        "--max-time",
+        &max_secs.to_string(),
+        "--max-filesize",
+        &max_text,
+        url,
+    ]);
+    let output = run_capturing(
+        command,
+        RunLimits::total(std::time::Duration::from_secs(max_secs.saturating_add(10))),
+        None,
+    )
+    .map_err(|e| EngineError::Io(format!("run curl: {}", e.message())))?;
 
     text_from_curl(url, output)
 }
@@ -172,10 +179,9 @@ fn candidate_app_paths() -> Vec<String> {
 /// Silicon reports `x86_64`). Values match `lipo` naming: `arm64` / `x86_64`.
 pub fn app_arch(app: &str) -> Option<String> {
     let plist = format!("{app}/Contents/Info.plist");
-    let exe = Command::new("/usr/libexec/PlistBuddy")
-        .args(["-c", "Print :CFBundleExecutable", &plist])
-        .output()
-        .ok()?;
+    let mut command = Command::new("/usr/libexec/PlistBuddy");
+    command.args(["-c", "Print :CFBundleExecutable", &plist]);
+    let exe = run_capturing(command, RunLimits::probe(), None).ok()?;
     if !exe.status.success() {
         return None;
     }
@@ -183,10 +189,9 @@ pub fn app_arch(app: &str) -> Option<String> {
     if exe_name.is_empty() {
         return None;
     }
-    let output = Command::new(LIPO)
-        .args(["-archs", &format!("{app}/Contents/MacOS/{exe_name}")])
-        .output()
-        .ok()?;
+    let mut command = Command::new(LIPO);
+    command.args(["-archs", &format!("{app}/Contents/MacOS/{exe_name}")]);
+    let output = run_capturing(command, RunLimits::probe(), None).ok()?;
     if !output.status.success() {
         return None;
     }
@@ -214,10 +219,9 @@ fn read_bundle_build(app: &str) -> Option<u64> {
     if !Path::new(&plist).exists() {
         return None;
     }
-    let output = Command::new("/usr/libexec/PlistBuddy")
-        .args(["-c", "Print :CFBundleVersion", &plist])
-        .output()
-        .ok()?;
+    let mut command = Command::new("/usr/libexec/PlistBuddy");
+    command.args(["-c", "Print :CFBundleVersion", &plist]);
+    let output = run_capturing(command, RunLimits::probe(), None).ok()?;
     if !output.status.success() {
         return None;
     }
@@ -297,9 +301,7 @@ fn quarantine_flags_indicate_translocation(value: &str) -> bool {
     const QTN_FLAG_DO_NOT_TRANSLOCATE: u32 = 0x0100;
     let flags_hex = value.split(';').next().unwrap_or("").trim();
     match u32::from_str_radix(flags_hex, 16) {
-        Ok(flags) => {
-            flags & QTN_FLAG_TRANSLOCATE != 0 && flags & QTN_FLAG_DO_NOT_TRANSLOCATE == 0
-        }
+        Ok(flags) => flags & QTN_FLAG_TRANSLOCATE != 0 && flags & QTN_FLAG_DO_NOT_TRANSLOCATE == 0,
         Err(_) => true,
     }
 }
@@ -313,10 +315,9 @@ pub fn read_bundle_executable(app: &str) -> Option<String> {
     if !Path::new(&plist).exists() {
         return None;
     }
-    let output = Command::new("/usr/libexec/PlistBuddy")
-        .args(["-c", "Print :CFBundleExecutable", &plist])
-        .output()
-        .ok()?;
+    let mut command = Command::new("/usr/libexec/PlistBuddy");
+    command.args(["-c", "Print :CFBundleExecutable", &plist]);
+    let output = run_capturing(command, RunLimits::probe(), None).ok()?;
     if !output.status.success() {
         return None;
     }
@@ -335,10 +336,9 @@ pub fn read_bundle_identifier(app: &str) -> Option<String> {
     if !Path::new(&plist).exists() {
         return None;
     }
-    let output = Command::new("/usr/libexec/PlistBuddy")
-        .args(["-c", "Print :CFBundleIdentifier", &plist])
-        .output()
-        .ok()?;
+    let mut command = Command::new("/usr/libexec/PlistBuddy");
+    command.args(["-c", "Print :CFBundleIdentifier", &plist]);
+    let output = run_capturing(command, RunLimits::probe(), None).ok()?;
     if !output.status.success() {
         return None;
     }
@@ -359,10 +359,9 @@ pub fn read_bundle_short_version(app: &str) -> Option<String> {
     if !Path::new(&plist).exists() {
         return None;
     }
-    let output = Command::new("/usr/libexec/PlistBuddy")
-        .args(["-c", "Print :CFBundleShortVersionString", &plist])
-        .output()
-        .ok()?;
+    let mut command = Command::new("/usr/libexec/PlistBuddy");
+    command.args(["-c", "Print :CFBundleShortVersionString", &plist]);
+    let output = run_capturing(command, RunLimits::probe(), None).ok()?;
     if !output.status.success() {
         return None;
     }
@@ -443,7 +442,10 @@ mod tests {
             installed_codex_build_at_path(&renamed),
             Some((renamed.clone(), 5059))
         );
-        assert_eq!(read_bundle_identifier(&renamed).as_deref(), Some(CODEX_BUNDLE_ID));
+        assert_eq!(
+            read_bundle_identifier(&renamed).as_deref(),
+            Some(CODEX_BUNDLE_ID)
+        );
 
         let _ = fs::remove_dir_all(&root);
     }

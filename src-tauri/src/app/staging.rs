@@ -44,6 +44,33 @@ pub fn staging_root() -> PathBuf {
 
 pub fn create_unique_staging(prefix: &str) -> Result<StagingDir, AppError> {
     let root = staging_root().join(format!("{prefix}-{}", Uuid::new_v4()));
+    create_staging_at(root, prefix)
+}
+
+/// Create a private staging directory on a caller-selected volume. macOS uses
+/// this when `/tmp` and the chosen Applications directory are on different
+/// filesystems, preserving the atomic-rename guarantee instead of failing late.
+pub fn create_unique_staging_in(parent: &Path, prefix: &str) -> Result<StagingDir, AppError> {
+    let safe_prefix: String = prefix
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let safe_prefix = if safe_prefix.is_empty() {
+        "update"
+    } else {
+        &safe_prefix
+    };
+    let root = parent.join(format!(".codex-manager-{safe_prefix}-{}", Uuid::new_v4()));
+    create_staging_at(root, safe_prefix)
+}
+
+fn create_staging_at(root: PathBuf, prefix: &str) -> Result<StagingDir, AppError> {
     if let Err(err) = std::fs::create_dir_all(&root) {
         log::error!(
             "failed to create staging directory path={} prefix={prefix} error={err}",
@@ -168,10 +195,7 @@ pub fn cleanup_stale_staging(ops: &OperationManager) -> CleanupSummary {
             }
             summary.scanned += 1;
             if crate::app::install_tx::path_is_protected(&path, &protected) {
-                log::info!(
-                    "staging cleanup skipped protected path={}",
-                    path.display()
-                );
+                log::info!("staging cleanup skipped protected path={}", path.display());
                 continue;
             }
             if !is_stale(&path, now) {
@@ -262,8 +286,8 @@ fn set_owner_only(_path: &Path) -> Result<(), AppError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        cleanup_stale_staging, clear_download_cache, create_unique_staging, download_cache_path,
-        download_cache_root,
+        cleanup_stale_staging, clear_download_cache, create_unique_staging,
+        create_unique_staging_in, download_cache_path, download_cache_root,
     };
     use crate::app::oplock::{OperationKind, OperationManager};
     use std::fs;
@@ -301,6 +325,25 @@ mod tests {
             .starts_with("update-"));
         first.discard();
         second.discard();
+    }
+
+    #[test]
+    fn create_unique_staging_in_stays_on_selected_parent() {
+        let parent = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-data")
+            .join(format!("same-volume-staging-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&parent).unwrap();
+        let staging = create_unique_staging_in(&parent, "fresh-install").unwrap();
+        assert_eq!(staging.path().parent(), Some(parent.as_path()));
+        assert!(staging
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with(".codex-manager-fresh-install-"));
+        staging.discard();
+        let _ = std::fs::remove_dir_all(parent);
     }
 
     #[cfg(unix)]

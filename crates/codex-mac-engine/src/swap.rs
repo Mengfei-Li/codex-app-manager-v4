@@ -14,6 +14,7 @@
 use std::path::Path;
 use std::process::Command;
 
+use crate::process::{run_capturing, RunLimits};
 use crate::EngineError;
 
 const OPEN: &str = "/usr/bin/open";
@@ -63,10 +64,13 @@ pub fn codex_running_at(install_app: &Path) -> bool {
         // No readable bundle at the path (e.g. already removed) — not running.
         return false;
     };
-    let pattern = format!("^{}( |$)", ere_escape(&format!("{app}/Contents/MacOS/{exe}")));
-    Command::new(PGREP)
-        .args(["-f", &pattern])
-        .output()
+    let pattern = format!(
+        "^{}( |$)",
+        ere_escape(&format!("{app}/Contents/MacOS/{exe}"))
+    );
+    let mut command = Command::new(PGREP);
+    command.args(["-f", &pattern]);
+    run_capturing(command, RunLimits::probe(), None)
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
@@ -86,9 +90,9 @@ pub fn translocated_instance_running(install_app: &Path) -> bool {
         "/AppTranslocation/.*/{}/Contents/MacOS/",
         ere_escape(bundle_name)
     );
-    Command::new(PGREP)
-        .args(["-f", &pattern])
-        .output()
+    let mut command = Command::new(PGREP);
+    command.args(["-f", &pattern]);
+    run_capturing(command, RunLimits::probe(), None)
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
@@ -98,12 +102,16 @@ pub fn translocated_instance_running(install_app: &Path) -> bool {
 /// `tell application id`, which lets LaunchServices pick any install of the
 /// id. Callers must gate on `codex_running_at` first: telling a non-running
 /// app launches it.
-fn tell_codex_at(install_app: &Path, verb: &str) -> std::io::Result<std::process::ExitStatus> {
+fn tell_codex_at(install_app: &Path, verb: &str) -> Result<std::process::ExitStatus, EngineError> {
     let script = format!(
         r#"tell application "{}" to {verb}"#,
         applescript_quote(&install_app.to_string_lossy())
     );
-    Command::new(OSASCRIPT).args(["-e", &script]).status()
+    let mut command = Command::new(OSASCRIPT);
+    command.args(["-e", &script]);
+    run_capturing(command, RunLimits::probe(), None)
+        .map(|output| output.status)
+        .map_err(|error| EngineError::Io(format!("run osascript: {}", error.message())))
 }
 
 /// Ask the Codex install at `install_app` to quit gracefully (AppleScript),
@@ -314,9 +322,7 @@ pub fn swap_in_place_with_observer(
             if had_old {
                 let _ = std::fs::rename(backup_app, install_app);
             }
-            let err = EngineError::Io(format!(
-                "install new bundle failed (rolled back): {e}"
-            ));
+            let err = EngineError::Io(format!("install new bundle failed (rolled back): {e}"));
             let install_path = install_app.display();
             log::error!("atomic swap failed install_path={install_path} error={err}");
             Err(err)
@@ -343,10 +349,11 @@ pub fn rollback(install_app: &Path, backup_app: &Path) -> Result<(), EngineError
 /// Relaunch Codex from the install root.
 pub fn relaunch(install_app: &Path) -> Result<(), EngineError> {
     log::info!("relaunching Codex");
-    let status = Command::new(OPEN)
-        .arg(install_app)
-        .status()
-        .map_err(|e| EngineError::Io(format!("open Codex: {e}")))?;
+    let mut command = Command::new(OPEN);
+    command.arg(install_app);
+    let status = run_capturing(command, RunLimits::probe(), None)
+        .map(|output| output.status)
+        .map_err(|error| EngineError::Io(format!("open Codex: {}", error.message())))?;
     if !status.success() {
         let err = EngineError::Io(format!("open Codex exited with {status}"));
         log::warn!("Codex relaunch failed error={err}");
@@ -390,10 +397,8 @@ mod tests {
 
     fn test_root(name: &str) -> std::path::PathBuf {
         let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!(
-            "codex-swap-{name}-{}-{id}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("codex-swap-{name}-{}-{id}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         root
@@ -417,12 +422,18 @@ mod tests {
         let (install, new_app, backup) = seed_bundles(&root);
 
         swap_in_place(&install, &new_app, &backup).unwrap();
-        assert_eq!(fs::read_to_string(install.join("Contents/ver")).unwrap(), "3575");
+        assert_eq!(
+            fs::read_to_string(install.join("Contents/ver")).unwrap(),
+            "3575"
+        );
         assert!(backup.join("Contents/ver").exists(), "old bundle preserved");
         assert!(!new_app.exists(), "new bundle moved into place");
 
         rollback(&install, &backup).unwrap();
-        assert_eq!(fs::read_to_string(install.join("Contents/ver")).unwrap(), "3511");
+        assert_eq!(
+            fs::read_to_string(install.join("Contents/ver")).unwrap(),
+            "3511"
+        );
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -456,7 +467,10 @@ mod tests {
         inject_swap_fault(Some(SwapFault::BeforeMoveOld));
         let err = swap_in_place(&install, &new_app, &backup).unwrap_err();
         assert!(err.to_string().contains("before-move-old"));
-        assert_eq!(fs::read_to_string(install.join("Contents/ver")).unwrap(), "3511");
+        assert_eq!(
+            fs::read_to_string(install.join("Contents/ver")).unwrap(),
+            "3511"
+        );
         assert!(new_app.exists());
         assert!(!backup.exists());
         let _ = fs::remove_dir_all(&root);
@@ -473,11 +487,20 @@ mod tests {
         assert!(!install.exists());
         assert!(backup.exists());
         assert!(new_app.exists());
-        assert_eq!(fs::read_to_string(backup.join("Contents/ver")).unwrap(), "3511");
-        assert_eq!(fs::read_to_string(new_app.join("Contents/ver")).unwrap(), "3575");
+        assert_eq!(
+            fs::read_to_string(backup.join("Contents/ver")).unwrap(),
+            "3511"
+        );
+        assert_eq!(
+            fs::read_to_string(new_app.join("Contents/ver")).unwrap(),
+            "3575"
+        );
         // Manual continue (recovery matrix: continue).
         fs::rename(&new_app, &install).unwrap();
-        assert_eq!(fs::read_to_string(install.join("Contents/ver")).unwrap(), "3575");
+        assert_eq!(
+            fs::read_to_string(install.join("Contents/ver")).unwrap(),
+            "3575"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -490,7 +513,10 @@ mod tests {
         assert!(err.to_string().contains("on-move-new"));
         // In-process fault path restores old immediately (same as real rename fail).
         assert!(install.exists());
-        assert_eq!(fs::read_to_string(install.join("Contents/ver")).unwrap(), "3511");
+        assert_eq!(
+            fs::read_to_string(install.join("Contents/ver")).unwrap(),
+            "3511"
+        );
         assert!(new_app.exists());
         let _ = fs::remove_dir_all(&root);
     }

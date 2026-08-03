@@ -19,6 +19,7 @@ pub mod download;
 pub mod limits;
 pub mod network;
 pub mod plan;
+pub mod process;
 pub mod swap;
 pub mod sys;
 pub mod verify;

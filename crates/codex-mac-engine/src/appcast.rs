@@ -78,9 +78,7 @@ pub fn parse_appcast(xml: &str) -> Result<Appcast, EngineError> {
         for child in item.children().filter(|n| n.is_element()) {
             match child.tag_name().name() {
                 "version" => build = child.text().and_then(parse_u64).or(build),
-                "shortVersionString" => {
-                    short_version = child.text().map(|t| t.trim().to_string())
-                }
+                "shortVersionString" => short_version = child.text().map(|t| t.trim().to_string()),
                 "minimumSystemVersion" => {
                     minimum_system_version = child.text().map(|t| t.trim().to_string())
                 }

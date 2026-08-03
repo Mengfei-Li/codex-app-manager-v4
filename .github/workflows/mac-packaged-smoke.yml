@@ -1,10 +1,12 @@
 name: macOS packaged smoke
 
-# PR-only unsigned bundle gate for native-shell behavior that cargo tests cannot
+# Unsigned bundle gate for native-shell behavior that cargo tests cannot
 # exercise: packaged WebKit IPC/CSP, native menus, single-instance activation,
 # and macOS close/quit shortcuts. It deliberately uses no signing, updater, or
 # notarization secrets; Developer ID and App Store Connect remain release-only.
 on:
+  push:
+    branches: [codex/v4-main]
   pull_request:
     paths:
       - "src-tauri/tauri.conf.json"

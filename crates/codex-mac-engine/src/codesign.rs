@@ -7,6 +7,7 @@
 use std::path::Path;
 use std::process::Command;
 
+use crate::process::{run_capturing, RunLimits};
 use crate::EngineError;
 
 const CODESIGN: &str = "/usr/bin/codesign";
@@ -81,11 +82,10 @@ fn gatekeeper_failure_message(app: &Path, stderr: &str) -> String {
 
 /// `codesign --verify --deep --strict` — fails if any sealed byte changed.
 pub fn verify_signature(app: &Path) -> Result<(), EngineError> {
-    let output = Command::new(CODESIGN)
-        .args(["--verify", "--deep", "--strict"])
-        .arg(app)
-        .output()
-        .map_err(|e| EngineError::Io(format!("spawn codesign: {e}")))?;
+    let mut command = Command::new(CODESIGN);
+    command.args(["--verify", "--deep", "--strict"]).arg(app);
+    let output = run_capturing(command, RunLimits::mutation(), None)
+        .map_err(|e| EngineError::Io(format!("run codesign: {}", e.message())))?;
     if !output.status.success() {
         return Err(EngineError::Verify(format!(
             "codesign verify failed: {}",
@@ -98,11 +98,10 @@ pub fn verify_signature(app: &Path) -> Result<(), EngineError> {
 /// Read the Team Identifier from a bundle's signature.
 pub fn team_identifier(app: &Path) -> Result<String, EngineError> {
     // `codesign -dv` prints its fields to stderr.
-    let output = Command::new(CODESIGN)
-        .args(["-dv", "--verbose=2"])
-        .arg(app)
-        .output()
-        .map_err(|e| EngineError::Io(format!("spawn codesign: {e}")))?;
+    let mut command = Command::new(CODESIGN);
+    command.args(["-dv", "--verbose=2"]).arg(app);
+    let output = run_capturing(command, RunLimits::probe(), None)
+        .map_err(|e| EngineError::Io(format!("run codesign: {}", e.message())))?;
     let text = String::from_utf8_lossy(&output.stderr);
     text.lines()
         .find_map(|l| l.strip_prefix("TeamIdentifier="))
@@ -126,11 +125,10 @@ pub fn require_team(app: &Path, expected: &str) -> Result<(), EngineError> {
 /// Passes offline when the notarization ticket is stapled (Codex's is).
 pub fn assess_gatekeeper(app: &Path) -> Result<(), EngineError> {
     prepare_gatekeeper_process_limits();
-    let output = Command::new(SPCTL)
-        .args(["--assess", "--type", "execute"])
-        .arg(app)
-        .output()
-        .map_err(|e| EngineError::Io(format!("spawn spctl: {e}")))?;
+    let mut command = Command::new(SPCTL);
+    command.args(["--assess", "--type", "execute"]).arg(app);
+    let output = run_capturing(command, RunLimits::mutation(), None)
+        .map_err(|e| EngineError::Io(format!("run spctl: {}", e.message())))?;
     if !output.status.success() {
         return Err(EngineError::Verify(gatekeeper_failure_message(
             app,

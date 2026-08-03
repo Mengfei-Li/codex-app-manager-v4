@@ -141,6 +141,7 @@ const PERFORM_OK: WinPerformReport = {
     notes: [],
   },
   sideload: null,
+  webInstaller: null,
   portable: null,
   msixHealth: null,
   installed: INSTALLED,

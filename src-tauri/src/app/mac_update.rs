@@ -415,20 +415,23 @@ fn human_bytes(bytes: u64) -> String {
     }
 }
 
-fn preflight_mac_disk(plan: &UpdatePlan) -> Result<(), AppError> {
-    preflight_mac_disk_with_available(plan, disk::available_space)
+fn preflight_mac_disk_at(plan: &UpdatePlan, path: &Path) -> Result<(), AppError> {
+    preflight_mac_disk_at_with_available(plan, path, disk::available_space)
 }
 
-fn preflight_mac_disk_with_available<F>(plan: &UpdatePlan, available: F) -> Result<(), AppError>
+fn preflight_mac_disk_at_with_available<F>(
+    plan: &UpdatePlan,
+    path: &Path,
+    available: F,
+) -> Result<(), AppError>
 where
     F: Fn(&Path) -> Result<Option<u64>, AppError>,
 {
-    let staging = staging::staging_root();
     let need = mac_space_budget(plan);
-    if let Some(free) = available(&staging)? {
+    if let Some(free) = available(path)? {
         if free < need {
             return Err(AppError::Engine(format!(
-                "磁盘可用空间不足：本次更新约需 {}，当前可用 {}。请清理后重试",
+                "目标卷可用空间不足：本次安装约需 {}，当前可用 {}。请清理后重试",
                 human_bytes(need),
                 human_bytes(free)
             )));
@@ -605,7 +608,14 @@ pub fn stage_macos_update_with_network(
     if let Some(latest) = appcast.latest() {
         require_os_supported(latest.minimum_system_version.as_deref())?;
     }
-    preflight_mac_disk(&plan)?;
+    let install_dir = match installed.as_ref() {
+        Some(installed) => Path::new(&installed.path)
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| AppError::Engine("无法确定 Codex 安装卷".to_string()))?,
+        None => choose_install_dir()?,
+    };
+    preflight_mac_disk_at(&plan, &install_dir)?;
 
     let signature = plan
         .ed_signature
@@ -815,13 +825,7 @@ pub fn perform_macos_update_with_network(
     progress: &dyn Fn(DownloadProgress),
     network: &NetworkConfig,
 ) -> Result<MacPerformReport, AppError> {
-    perform_macos_update_with_network_and_phase(
-        binary_delta,
-        expected,
-        progress,
-        network,
-        None,
-    )
+    perform_macos_update_with_network_and_phase(binary_delta, expected, progress, network, None)
 }
 
 pub fn perform_macos_update_with_network_and_phase(
@@ -885,6 +889,10 @@ pub fn perform_macos_update_with_network_and_phase(
     }
 
     let install_path = PathBuf::from(&installed.path);
+    let install_dir = install_path
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| AppError::Engine("无法确定 Codex 安装卷".to_string()))?;
 
     let (_, xml) = fetch_appcast_for_arch(&installed.arch, network)?;
     let appcast = parse_appcast(&xml).map_err(|e| AppError::Engine(e.to_string()))?;
@@ -927,7 +935,7 @@ pub fn perform_macos_update_with_network_and_phase(
     if let Some(latest) = appcast.latest() {
         require_os_supported(latest.minimum_system_version.as_deref())?;
     }
-    preflight_mac_disk(&plan)?;
+    preflight_mac_disk_at(&plan, &install_dir)?;
     // Last cancel checkpoint before the download begins: the preparing phase
     // (appcast fetch → plan → preflight) is done; once curl starts, the download
     // loop's own cancel flag takes over. A cancel pressed during "正在准备"
@@ -936,7 +944,17 @@ pub fn perform_macos_update_with_network_and_phase(
     set_phase(OperationPhase::Downloading);
 
     // 1) Set up same-volume staging for the reconstructed bundle + backup.
-    let staging = staging::create_unique_staging("update")?;
+    let initial_staging = staging::create_unique_staging("update")?;
+    let staging = if codex_mac_engine::swap::same_volume(initial_staging.path(), &install_dir) {
+        initial_staging
+    } else {
+        log::warn!(
+            "default staging volume differs from install volume; switching to same-volume staging install_dir={}",
+            install_dir.display()
+        );
+        initial_staging.discard();
+        staging::create_unique_staging_in(&install_dir, "fresh-install")?
+    };
     let work = staging.path().to_path_buf();
     let out_app = work.join("Codex.app");
     let backup = work.join("backup-Codex.app");
@@ -1372,12 +1390,22 @@ pub fn install_macos_with_network_and_phase(
     }
     let plan = plan_update(&appcast, 0)
         .ok_or_else(|| AppError::Engine("appcast had no items".to_string()))?;
-    preflight_mac_disk(&plan)?;
+    preflight_mac_disk_at(&plan, &install_dir)?;
     // Cancel checkpoint before bytes flow (mirrors perform) — makes a fresh
     // install's "正在准备" cancellable too.
     check_update_abort()?;
 
-    let staging = staging::create_unique_staging("update")?;
+    let initial_staging = staging::create_unique_staging("install")?;
+    let staging = if codex_mac_engine::swap::same_volume(initial_staging.path(), &install_dir) {
+        initial_staging
+    } else {
+        log::warn!(
+            "default staging volume differs from install volume; switching to same-volume staging install_dir={}",
+            install_dir.display()
+        );
+        initial_staging.discard();
+        staging::create_unique_staging_in(&install_dir, "fresh-install")?
+    };
     let install_result = install_macos_in_staging(
         &appcast,
         &install_dir,
@@ -1467,7 +1495,8 @@ fn install_macos_in_staging(
     } else {
         outcome.path = Some(install_path.to_string_lossy().into_owned());
         outcome.provenance = StepOutcome::failed("安装后未能读取 bundle 版本，托管记录未写入");
-        outcome.push_warning("已写入应用，但未能确认版本；请重新检查状态或「开始管理」".to_string());
+        outcome
+            .push_warning("已写入应用，但未能确认版本；请重新检查状态或「开始管理」".to_string());
         outcome.push_recovery(recovery::RECORD_PROVENANCE);
         outcome.install_class = Some("external".to_string());
         // Honest: app may be present but we couldn't classify it as managed.
@@ -1740,11 +1769,7 @@ where
         match detect_install() {
             Some(installed) => {
                 let mut store = ProvenanceStore::load();
-                store.record(
-                    installed.path.clone(),
-                    installed.build,
-                    "manager-installed",
-                );
+                store.record(installed.path.clone(), installed.build, "manager-installed");
                 match store.save() {
                     Ok(()) => {
                         outcome.provenance = StepOutcome::ok();
@@ -1859,11 +1884,15 @@ mod disk_preflight_tests {
     #[test]
     fn preflight_mac_disk_rejects_low_space_and_allows_unknown_space() {
         let p = plan(100, 200, UpdateStrategy::Full);
-        let err = preflight_mac_disk_with_available(&p, |_| Ok(Some(10))).unwrap_err();
-        assert!(err.to_string().contains("磁盘可用空间不足"));
+        let target = Path::new("/Applications");
+        let err = preflight_mac_disk_at_with_available(&p, target, |_| Ok(Some(10))).unwrap_err();
+        assert!(err.to_string().contains("目标卷可用空间不足"));
 
-        assert!(preflight_mac_disk_with_available(&p, |_| Ok(None)).is_ok());
-        assert!(preflight_mac_disk_with_available(&p, |_| Ok(Some(mac_space_budget(&p)))).is_ok());
+        assert!(preflight_mac_disk_at_with_available(&p, target, |_| Ok(None)).is_ok());
+        assert!(preflight_mac_disk_at_with_available(&p, target, |_| {
+            Ok(Some(mac_space_budget(&p)))
+        })
+        .is_ok());
     }
 
     #[test]

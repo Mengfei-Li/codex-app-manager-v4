@@ -848,6 +848,103 @@ pub fn run() {
                         recovery.failed
                     );
                 }
+                #[cfg(target_os = "windows")]
+                if let Some(store) = crate::app::reboot_continuation::default_store() {
+                    match store.take_pending(crate::app::reboot_continuation::now_unix()) {
+                        Ok(Some(payload)) => {
+                            log::info!(
+                                "starting one-shot reboot continuation receipt_id={} attempt={} package={} version={}",
+                                payload.receipt_id,
+                                payload.attempt,
+                                payload.package_moniker,
+                                payload.latest_version
+                            );
+                            let result = match operations
+                                .begin(crate::app::oplock::OperationKind::Update)
+                            {
+                                Ok(operation_guard) => {
+                                    let token = operation_guard.token().clone();
+                                    let (endpoints, settings) = {
+                                        let state =
+                                            recovery_app.state::<state::ManagerState>();
+                                        (state.endpoints.clone(), state.settings.clone())
+                                    };
+                                    let phase_operations = operations.clone();
+                                    let phase_token = token.clone();
+                                    let phase_hook = move |phase| {
+                                        let _ = phase_operations.set_phase(&phase_token, phase);
+                                    };
+                                    let evidence_operations = operations.clone();
+                                    let evidence_token = token.clone();
+                                    let evidence_hook = move |evidence| match evidence {
+                                        crate::app::win_update::OperationEvidence::MutationStarted => {
+                                            let _ = evidence_operations
+                                                .mark_mutation_started(&evidence_token);
+                                        }
+                                        crate::app::win_update::OperationEvidence::MutationRolledBack => {
+                                            let _ = evidence_operations
+                                                .mark_mutation_rolled_back(&evidence_token);
+                                        }
+                                        crate::app::win_update::OperationEvidence::OutcomeAmbiguous => {
+                                            let _ = evidence_operations
+                                                .mark_outcome_ambiguous(&evidence_token);
+                                        }
+                                    };
+                                    let _resume_guard =
+                                        crate::app::reboot_continuation::ResumeAttemptGuard::enter();
+                                    let result = crate::app::win_update::perform_windows_update_with_install_mode_network_and_phase(
+                                        &endpoints,
+                                        &settings,
+                                        true,
+                                        &payload.install_mode,
+                                        None,
+                                        &|_| {},
+                                        &codex_win_engine::NetworkConfig::system(),
+                                        Some(&phase_hook),
+                                        Some(&evidence_hook),
+                                    );
+                                    let succeeded = result
+                                        .as_ref()
+                                        .map(|report| report.success)
+                                        .unwrap_or(false);
+                                    let _ = operations.record_completion(&token, succeeded);
+                                    drop(operation_guard);
+                                    result
+                                }
+                                Err(error) => Err(crate::errors::AppError::Engine(format!(
+                                    "重启续装无法取得操作锁: {error}"
+                                ))),
+                            };
+                            let succeeded = result
+                                .as_ref()
+                                .map(|report| report.success)
+                                .unwrap_or(false);
+                            let error = result.as_ref().err().map(ToString::to_string);
+                            if let Err(finish_error) = store.finish(succeeded, error.clone()) {
+                                log::error!(
+                                    "failed to finalize reboot continuation receipt_id={} error={finish_error}",
+                                    payload.receipt_id
+                                );
+                            }
+                            if succeeded {
+                                log::info!(
+                                    "one-shot reboot continuation succeeded receipt_id={}",
+                                    payload.receipt_id
+                                );
+                            } else {
+                                log::error!(
+                                    "one-shot reboot continuation failed terminally receipt_id={} error={}",
+                                    payload.receipt_id,
+                                    error.unwrap_or_else(|| "unknown".to_string())
+                                );
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            log::error!("reboot continuation receipt rejected error={error}");
+                        }
+                    }
+                }
                 let summary = crate::app::staging::cleanup_stale_staging(&operations);
                 if summary.failed > 0 {
                     log::warn!(

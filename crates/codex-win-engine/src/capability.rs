@@ -122,7 +122,10 @@ impl WinCapabilityReport {
             "Windows capability probe result add_appx={add_appx} appx_service={appx_service_state} sideload_policy={sideload_policy_state} msix_deployment={msix_deployment_state} developer_mode={developer_mode} metered={metered}"
         );
         if recommendation == SideloadRecommendation::PortableFallback {
-            let reason = notes.last().map(String::as_str).unwrap_or("MSIX sideload blocked");
+            let reason = notes
+                .last()
+                .map(String::as_str)
+                .unwrap_or("MSIX sideload blocked");
             log::warn!("MSIX sideload blocked; recommending portable fallback reason={reason}");
         }
 

@@ -5,8 +5,9 @@
 //! enterprise-policy machines cannot freeze the manager indefinitely.
 
 use std::ffi::OsStr;
+use std::io::Read;
 use std::path::PathBuf;
-use std::process::{Child, Command, Output, Stdio};
+use std::process::{Child, ChildStderr, ChildStdout, Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -169,51 +170,134 @@ fn cancelled(flag: Option<&AtomicBool>) -> bool {
 /// Run `command` to completion with a total deadline (and optional cancel flag).
 /// Captures stdout/stderr. Does not interpret exit codes — callers do.
 pub fn run_capturing(
-    mut command: Command,
+    command: Command,
     limits: RunLimits,
     cancel: Option<&AtomicBool>,
 ) -> Result<Output, RunError> {
-    command.stdout(Stdio::piped());
-    command.stderr(Stdio::piped());
-    let mut child = command
-        .spawn()
-        .map_err(|e| RunError::Spawn(e.to_string()))?;
-    wait_child(
-        &mut child,
+    run_capturing_inner(command, limits, cancel, None, None, None, None)
+}
+
+/// Capturing runner with child PID and one-second heartbeat callbacks.
+pub(crate) fn run_capturing_observed(
+    command: Command,
+    limits: RunLimits,
+    cancel: Option<&AtomicBool>,
+    on_spawn: &dyn Fn(u32),
+    on_heartbeat: &dyn Fn(Duration),
+) -> Result<Output, RunError> {
+    run_capturing_inner(
+        command,
         limits,
         cancel,
-        /*progress*/ None,
-        /*on_progress*/ None,
-    )?;
-    child
-        .wait_with_output()
-        .map_err(|e| RunError::Wait(e.to_string()))
+        None,
+        None,
+        Some(on_spawn),
+        Some(on_heartbeat),
+    )
 }
 
 /// Like [`run_capturing`], but tracks a progress signal for stall detection.
 /// `progress` is polled each loop; `on_progress` is notified when the value grows.
 pub fn run_with_progress(
-    mut command: Command,
+    command: Command,
     limits: RunLimits,
     cancel: Option<&AtomicBool>,
     progress: &dyn Fn() -> u64,
     on_progress: &dyn Fn(u64),
+) -> Result<Output, RunError> {
+    run_capturing_inner(
+        command,
+        limits,
+        cancel,
+        Some(progress),
+        Some(on_progress),
+        None,
+        None,
+    )
+}
+
+fn drain_stdout(mut pipe: ChildStdout) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    pipe.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn drain_stderr(mut pipe: ChildStderr) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    pipe.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// Spawn a child while continuously draining both output pipes.
+///
+/// Waiting for the child to exit before reading a piped stream deadlocks once
+/// the child fills the OS pipe buffer. AppX/PowerShell diagnostics can easily
+/// exceed that buffer, so the readers must run for the entire child lifetime.
+fn run_capturing_inner(
+    mut command: Command,
+    limits: RunLimits,
+    cancel: Option<&AtomicBool>,
+    progress: Option<&dyn Fn() -> u64>,
+    on_progress: Option<&dyn Fn(u64)>,
+    on_spawn: Option<&dyn Fn(u32)>,
+    on_heartbeat: Option<&dyn Fn(Duration)>,
 ) -> Result<Output, RunError> {
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
     let mut child = command
         .spawn()
         .map_err(|e| RunError::Spawn(e.to_string()))?;
-    wait_child(
+    if let Some(callback) = on_spawn {
+        callback(child.id());
+    }
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| RunError::Wait("stdout pipe was not created".to_string()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| RunError::Wait("stderr pipe was not created".to_string()))?;
+    let stdout_reader = thread::spawn(move || drain_stdout(stdout));
+    let stderr_reader = thread::spawn(move || drain_stderr(stderr));
+
+    let wait_result = wait_child(
         &mut child,
         limits,
         cancel,
-        Some(progress),
-        Some(on_progress),
-    )?;
-    child
-        .wait_with_output()
-        .map_err(|e| RunError::Wait(e.to_string()))
+        progress,
+        on_progress,
+        on_heartbeat,
+    );
+    let status_result: Result<ExitStatus, RunError> = match wait_result {
+        Ok(()) => child.wait().map_err(|e| RunError::Wait(e.to_string())),
+        Err(err) => Err(err),
+    };
+
+    // A timeout/cancel path has already killed and reaped the process. Joining
+    // here guarantees that all bytes written before termination are retained
+    // and that no reader thread survives the operation.
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| RunError::Wait("stdout reader panicked".to_string()))?
+        .map_err(|e| RunError::Wait(format!("stdout read failed: {e}")))?;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| RunError::Wait("stderr reader panicked".to_string()))?
+        .map_err(|e| RunError::Wait(format!("stderr read failed: {e}")))?;
+
+    match status_result {
+        Ok(status) => Ok(Output {
+            status,
+            stdout,
+            stderr,
+        }),
+        Err(RunError::Timeout { kind, .. }) => Err(RunError::Timeout {
+            kind,
+            partial_stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        }),
+        Err(err) => Err(err),
+    }
 }
 
 fn wait_child(
@@ -222,15 +306,25 @@ fn wait_child(
     cancel: Option<&AtomicBool>,
     progress: Option<&dyn Fn() -> u64>,
     on_progress: Option<&dyn Fn(u64)>,
+    on_heartbeat: Option<&dyn Fn(Duration)>,
 ) -> Result<(), RunError> {
     let started = Instant::now();
     let mut last_progress = progress.map(|p| p()).unwrap_or(0);
     let mut last_progress_at = Instant::now();
+    let mut last_heartbeat_at = Instant::now()
+        .checked_sub(Duration::from_secs(1))
+        .unwrap_or_else(Instant::now);
     if let (Some(p), Some(cb)) = (progress, on_progress) {
         cb(p());
     }
 
     loop {
+        if let Some(callback) = on_heartbeat {
+            if last_heartbeat_at.elapsed() >= Duration::from_secs(1) {
+                callback(started.elapsed());
+                last_heartbeat_at = Instant::now();
+            }
+        }
         if cancelled(cancel) {
             terminate_tree(child);
             return Err(RunError::Cancelled);
@@ -384,6 +478,33 @@ mod tests {
         }
     }
 
+    fn large_output_command(bytes_per_stream: usize) -> Command {
+        #[cfg(windows)]
+        {
+            let mut cmd = hidden_command("powershell.exe");
+            cmd.args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &format!(
+                    "$s='x' * {bytes_per_stream}; [Console]::Out.Write($s); [Console]::Error.Write($s)"
+                ),
+            ]);
+            cmd
+        }
+        #[cfg(not(windows))]
+        {
+            let mut cmd = Command::new("sh");
+            cmd.args([
+                "-c",
+                &format!(
+                    "head -c {bytes_per_stream} /dev/zero | tr '\\0' x; head -c {bytes_per_stream} /dev/zero | tr '\\0' x >&2"
+                ),
+            ]);
+            cmd
+        }
+    }
+
     #[test]
     fn total_timeout_kills_hung_child() {
         let err = run_capturing(
@@ -412,6 +533,37 @@ mod tests {
         assert!(output.status.success());
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.contains("alive"), "stdout={stdout}");
+    }
+
+    #[test]
+    fn drains_large_stdout_and_stderr_without_pipe_deadlock() {
+        const BYTES: usize = 4 * 1024 * 1024;
+        let output = run_capturing(
+            large_output_command(BYTES),
+            RunLimits::total(Duration::from_secs(30)),
+            None,
+        )
+        .expect("large output must be drained while child is running");
+        assert!(output.status.success());
+        assert_eq!(output.stdout.len(), BYTES);
+        assert_eq!(output.stderr.len(), BYTES);
+    }
+
+    #[test]
+    fn observed_runner_reports_pid_and_heartbeat() {
+        let pid = std::sync::Mutex::new(None);
+        let heartbeats = std::sync::Mutex::new(Vec::new());
+        let output = run_capturing_observed(
+            sleep_command(2),
+            RunLimits::total(Duration::from_secs(15)),
+            None,
+            &|value| *pid.lock().unwrap() = Some(value),
+            &|elapsed| heartbeats.lock().unwrap().push(elapsed),
+        )
+        .expect("observed child should complete");
+        assert!(output.status.success());
+        assert!(pid.lock().unwrap().is_some());
+        assert!(heartbeats.lock().unwrap().len() >= 2);
     }
 
     #[test]
@@ -483,11 +635,8 @@ mod tests {
 
     #[test]
     fn immediate_exit_liveness_detected() {
-        let result = spawn_and_require_liveness(
-            immediate_exit_command(7),
-            Duration::from_secs(2),
-        )
-        .expect("spawn");
+        let result = spawn_and_require_liveness(immediate_exit_command(7), Duration::from_secs(2))
+            .expect("spawn");
         match result {
             LivenessResult::ExitedEarly { code } => {
                 assert_eq!(code, Some(7));
@@ -501,8 +650,8 @@ mod tests {
 
     #[test]
     fn surviving_child_reported_alive() {
-        let result =
-            spawn_and_require_liveness(sleep_command(30), Duration::from_millis(400)).expect("spawn");
+        let result = spawn_and_require_liveness(sleep_command(30), Duration::from_millis(400))
+            .expect("spawn");
         match result {
             LivenessResult::Survived { mut child } => {
                 terminate_tree(&mut child);

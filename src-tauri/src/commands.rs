@@ -16,10 +16,10 @@ use crate::app::mac_update::{
     cancel_macos_download, detect_existing_install_at_path as detect_macos_install_at_path,
     discard_macos_download, install_macos_with_network_and_phase,
     mac_adopt_path as adopt_macos_path, pause_macos_download,
-    perform_macos_update_with_network_and_phase,
-    plan_macos_update_with_network, retry_macos_ancillary, stage_macos_update_with_network,
-    uninstall_macos, InstalledCodex, MacInstallStatus, MacPerformReport, MacStageReport,
-    MacUninstallReport, MacUpdateReport, PerformExpectation,
+    perform_macos_update_with_network_and_phase, plan_macos_update_with_network,
+    retry_macos_ancillary, stage_macos_update_with_network, uninstall_macos, InstalledCodex,
+    MacInstallStatus, MacPerformReport, MacStageReport, MacUninstallReport, MacUpdateReport,
+    PerformExpectation,
 };
 use crate::app::op_phase::{OperationPhase, QuitPolicy};
 use crate::app::operation_outcome::{AncillaryRetryReport, AncillaryRetryRequest};
@@ -32,19 +32,19 @@ use crate::app::provenance::ProvenanceStore;
 use crate::app::settings_store::AppSettings as PersistedAppSettings;
 use crate::app::settings_store::{ProxyMode, UpdateSource};
 use crate::app::url_guard::{validate_custom_proxy, validate_custom_source};
-use crate::app::window_mode::{self, WindowMode, WindowModeReport};
 use crate::app::win_update::{
     auto_stage_windows_update_with_install_mode_and_network, cancel_windows_download,
     detect_existing_windows_install_at_path as detect_windows_install_at_path,
     discard_windows_download, pause_windows_download,
     perform_windows_update_with_install_mode_network_and_phase,
-    plan_windows_update_with_install_mode_and_network,
-    retry_windows_ancillary, stage_windows_update_with_install_mode_and_network,
-    uninstall_windows_codex, win_adopt as adopt_windows_install,
-    win_adopt_path as adopt_windows_path, win_install_status,
-    DownloadProgress as WinDownloadProgress, OperationEvidence, WinAutoStageReport, WinInstallStatus,
-    WinPerformExpectation, WinPerformReport, WinStageReport, WinUninstallReport, WinUpdateReport,
+    plan_windows_update_with_install_mode_and_network, retry_windows_ancillary,
+    stage_windows_update_with_install_mode_and_network, uninstall_windows_codex,
+    win_adopt as adopt_windows_install, win_adopt_path as adopt_windows_path, win_install_status,
+    DownloadProgress as WinDownloadProgress, OperationEvidence, WinAutoStageReport,
+    WinInstallStatus, WinPerformExpectation, WinPerformReport, WinStageReport, WinUninstallReport,
+    WinUpdateReport,
 };
+use crate::app::window_mode::{self, WindowMode, WindowModeReport};
 use crate::domain::settings::AppSettings as DomainAppSettings;
 use crate::domain::target::OperatingSystem;
 use crate::errors::{AppError, CommandError};
@@ -430,7 +430,8 @@ fn destructive_token_error(err: OperationError) -> CommandError {
 fn refresh_config_health(state: &ManagerState) -> ConfigHealth {
     let (_, settings_health) = PersistedAppSettings::load_with_health();
     let (_, provenance_health) = ProvenanceStore::load_with_health();
-    let health = ConfigHealth::from_parts(settings_health, provenance_health).with_live_backup_flags();
+    let health =
+        ConfigHealth::from_parts(settings_health, provenance_health).with_live_backup_flags();
     let mut slot = state
         .config_health
         .lock()
@@ -544,8 +545,9 @@ fn probe_install_parent_replace(path: &Path) -> Result<PathBuf, AppError> {
     let probe_dir = nearest_existing_dir(requested_parent);
     let probe_id = uuid::Uuid::new_v4();
     let source = probe_dir.join(format!("{INSTALL_LOCATION_PROBE_PREFIX}{probe_id}-source"));
-    let destination =
-        probe_dir.join(format!("{INSTALL_LOCATION_PROBE_PREFIX}{probe_id}-destination"));
+    let destination = probe_dir.join(format!(
+        "{INSTALL_LOCATION_PROBE_PREFIX}{probe_id}-destination"
+    ));
 
     let probe_result = (|| -> std::io::Result<()> {
         std::fs::create_dir(&source)?;
@@ -1118,10 +1120,9 @@ pub fn restore_config_backup(
         _ => "ok",
     };
     if status == "corrupt" {
-        return Err(AppError::Internal(format!(
-            "已从 .bak 还原 {which}，但重新读取仍判定为损坏"
-        ))
-        .into());
+        return Err(
+            AppError::Internal(format!("已从 .bak 还原 {which}，但重新读取仍判定为损坏")).into(),
+        );
     }
     Ok(health)
 }
@@ -1156,10 +1157,7 @@ pub fn reset_config(
         _ => "ok",
     };
     if status == "corrupt" {
-        return Err(AppError::Internal(format!(
-            "已重置 {which}，但重新读取仍判定为损坏"
-        ))
-        .into());
+        return Err(AppError::Internal(format!("已重置 {which}，但重新读取仍判定为损坏")).into());
     }
     Ok(health)
 }
@@ -1192,26 +1190,22 @@ pub fn retry_ancillary(
     }
     let _guard: RetryGuard = if purge {
         if confirm != Some(true) {
-            return Err(AppError::Internal(
-                "清除用户数据需要二次确认（confirm=true）".to_string(),
-            )
-            .into());
+            return Err(
+                AppError::Internal("清除用户数据需要二次确认（confirm=true）".to_string()).into(),
+            );
         }
         let token = token.ok_or_else(|| {
             AppError::Internal(
                 "清除用户数据需要破坏性令牌（先 arm_destructive uninstall）".to_string(),
             )
         })?;
-        let guard =
-            DetachedGuard::validate_with_phase(&state, token, OperationPhase::Committing)?;
+        let guard = DetachedGuard::validate_with_phase(&state, token, OperationPhase::Committing)?;
         RetryGuard::Detached(guard)
     } else {
         RetryGuard::Scoped(begin_guard(&state, OperationKind::Adopt)?)
     };
     match state.target.os {
-        OperatingSystem::Macos => {
-            retry_macos_ancillary(actions, path, purge).map_err(Into::into)
-        }
+        OperatingSystem::Macos => retry_macos_ancillary(actions, path, purge).map_err(Into::into),
         OperatingSystem::Windows => {
             let settings = windows_domain_settings_for_persisted(&state);
             retry_windows_ancillary(&settings, actions, path, purge).map_err(Into::into)
@@ -1297,7 +1291,10 @@ pub fn get_operation_completion(
 /// CloseRequested / ExitRequested guards stop intercepting and let it go.
 /// Still refuses when the backend is in a non-interruptible install phase.
 #[tauri::command]
-pub fn confirm_quit(app: tauri::AppHandle, state: State<'_, ManagerState>) -> Result<(), CommandError> {
+pub fn confirm_quit(
+    app: tauri::AppHandle,
+    state: State<'_, ManagerState>,
+) -> Result<(), CommandError> {
     let confirm_close = crate::app::settings_store::AppSettings::load().confirm_close;
     // Decide and arm exit under the SAME operation mutex used by phase changes.
     // If the worker already reached commit this returns Block. Otherwise both app
@@ -1925,9 +1922,7 @@ pub async fn win_perform_update(
             if let Some(token) = phase_token.as_ref() {
                 let result = match evidence {
                     OperationEvidence::MutationStarted => ops.mark_mutation_started(token),
-                    OperationEvidence::MutationRolledBack => {
-                        ops.mark_mutation_rolled_back(token)
-                    }
+                    OperationEvidence::MutationRolledBack => ops.mark_mutation_rolled_back(token),
                     OperationEvidence::OutcomeAmbiguous => ops.mark_outcome_ambiguous(token),
                 };
                 if let Err(error) = result {
@@ -2002,8 +1997,8 @@ pub async fn win_uninstall(
 mod tests {
     use super::{
         install_root_from_picked_dir, manager_update_matches_confirmation,
-        normalize_windows_source_base, validate_install_root_path, INSTALL_LOCATION_PROBE_PREFIX,
-        validated_custom_proxy_for_settings,
+        normalize_windows_source_base, validate_install_root_path,
+        validated_custom_proxy_for_settings, INSTALL_LOCATION_PROBE_PREFIX,
     };
     use std::fs;
 

@@ -56,7 +56,7 @@ fn main() {
 
     println!("\n对真实 /Applications 执行 install_gated_bundle(manage_process={was_running})…");
     match swap::install_gated_bundle(&install, &new_app, &backup, was_running) {
-        Ok(()) => println!("  ✓ gate + 原子替换" ),
+        Ok(()) => println!("  ✓ gate + 原子替换"),
         Err(e) => {
             eprintln!("  ❌ {e}\n  （/Applications 未变更或已回滚）");
             let _ = std::fs::remove_dir_all(&stage_dir);

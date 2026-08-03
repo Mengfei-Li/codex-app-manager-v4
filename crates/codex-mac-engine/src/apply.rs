@@ -14,6 +14,7 @@
 use std::path::Path;
 use std::process::Command;
 
+use crate::process::{run_capturing, RunLimits};
 use crate::EngineError;
 
 /// Apply `patch` against `basis_app`, producing a new bundle at `out_app`.
@@ -34,13 +35,10 @@ pub fn apply_delta(
             .map_err(|e| EngineError::Io(format!("clear out_app: {e}")))?;
     }
 
-    let output = Command::new(binary_delta)
-        .arg("apply")
-        .arg(basis_app)
-        .arg(out_app)
-        .arg(patch)
-        .output()
-        .map_err(|e| EngineError::Io(format!("spawn BinaryDelta: {e}")))?;
+    let mut command = Command::new(binary_delta);
+    command.arg("apply").arg(basis_app).arg(out_app).arg(patch);
+    let output = run_capturing(command, RunLimits::delta(), None)
+        .map_err(|e| EngineError::Io(format!("run BinaryDelta: {}", e.message())))?;
 
     if !output.status.success() {
         let err = EngineError::Apply(format!(

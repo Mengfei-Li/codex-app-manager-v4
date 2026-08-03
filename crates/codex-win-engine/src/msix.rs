@@ -48,9 +48,9 @@ const FRAMEWORK_DEPENDENCY_PREFIXES: &[&str] = &[
 /// want to steer to portable when a *framework* the sideload cannot acquire is
 /// absent. Pure + cross-platform so it is unit-tested off Windows.
 pub fn is_framework_dependency(name: &str) -> bool {
-    FRAMEWORK_DEPENDENCY_PREFIXES
-        .iter()
-        .any(|prefix| name.len() >= prefix.len() && name[..prefix.len()].eq_ignore_ascii_case(prefix))
+    FRAMEWORK_DEPENDENCY_PREFIXES.iter().any(|prefix| {
+        name.len() >= prefix.len() && name[..prefix.len()].eq_ignore_ascii_case(prefix)
+    })
 }
 
 /// The package-root-relative path of the app's entry executable, from the
@@ -297,7 +297,10 @@ mod tests {
             // Case-insensitive: registry/manifest casing can vary.
             "microsoft.vclibs.140.00",
         ] {
-            assert!(is_framework_dependency(name), "{name} should be a framework");
+            assert!(
+                is_framework_dependency(name),
+                "{name} should be a framework"
+            );
         }
         for name in ["OpenAI.Codex", "Microsoft.WindowsTerminal", "Contoso.App"] {
             assert!(

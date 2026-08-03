@@ -12,9 +12,9 @@ use crate::limits::MAX_TEXT_BYTES;
 use crate::msix::parse_appx_manifest_xml;
 use crate::network::{is_schannel_revocation_offline, NetworkConfig, SchannelRevocationCheck};
 use crate::process::{
-    curl_exe, hidden_command, run_capturing, spawn_and_require_liveness, LivenessResult,
-    RunError, RunLimits, TimeoutKind, MSIX_ACTIVATION_WINDOW_SECS, MSIX_LIVENESS_WINDOW_SECS,
-    PORTABLE_LIVENESS_WINDOW,
+    curl_exe, hidden_command, run_capturing, run_capturing_observed, spawn_and_require_liveness,
+    LivenessResult, RunError, RunLimits, TimeoutKind, MSIX_ACTIVATION_WINDOW_SECS,
+    MSIX_LIVENESS_WINDOW_SECS, PORTABLE_LIVENESS_WINDOW,
 };
 use crate::EngineError;
 
@@ -67,6 +67,25 @@ pub struct MsixSideloadReport {
     pub installed: Option<InstalledWindowsCodex>,
     pub fallback_recommended: bool,
     pub raw_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "event", rename_all = "kebab-case")]
+pub enum AppxWorkerEvent {
+    Started {
+        pid: u32,
+    },
+    Heartbeat {
+        elapsed_ms: u64,
+    },
+    Completed {
+        exit_code: Option<i32>,
+        stdout: String,
+        stderr: String,
+    },
+    Failed {
+        error: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -191,8 +210,12 @@ fn fetch_text_output(
     ]);
     // curl's own --max-time is the primary budget; the outer deadline is a
     // backstop that also kills a hung curl that ignored max-time.
-    run_capturing(command, RunLimits::total(std::time::Duration::from_secs(75)), None)
-        .map_err(|e| EngineError::Io(format!("curl: {}", e.message())))
+    run_capturing(
+        command,
+        RunLimits::total(std::time::Duration::from_secs(75)),
+        None,
+    )
+    .map_err(|e| EngineError::Io(format!("curl: {}", e.message())))
 }
 
 pub fn fetch_text_with_network(url: &str, network: &NetworkConfig) -> Result<String, EngineError> {
@@ -387,6 +410,51 @@ fn run_powershell_json_with_limits(
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+#[cfg(windows)]
+fn run_powershell_json_with_limits_observed(
+    script: &str,
+    limits: RunLimits,
+    observer: &dyn Fn(AppxWorkerEvent),
+) -> Result<String, PowerShellRunError> {
+    let mut command = hidden_command(powershell_exe());
+    command.args(["-NoProfile", "-NonInteractive", "-Command", script]);
+    let output = match run_capturing_observed(
+        command,
+        limits,
+        None,
+        &|pid| observer(AppxWorkerEvent::Started { pid }),
+        &|elapsed| {
+            observer(AppxWorkerEvent::Heartbeat {
+                elapsed_ms: elapsed.as_millis().min(u64::MAX as u128) as u64,
+            })
+        },
+    ) {
+        Ok(output) => output,
+        Err(error) => {
+            observer(AppxWorkerEvent::Failed {
+                error: error.message(),
+            });
+            return Err(match error {
+                RunError::Timeout { kind, .. } => PowerShellRunError::Timeout(kind),
+                other => PowerShellRunError::Other(format!("powershell: {}", other.message())),
+            });
+        }
+    };
+    observer(AppxWorkerEvent::Completed {
+        exit_code: output.status.code(),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    });
+    if !output.status.success() {
+        return Err(PowerShellRunError::Other(format!(
+            "powershell failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    String::from_utf8(output.stdout)
+        .map_err(|error| PowerShellRunError::Other(format!("PowerShell UTF-8: {error}")))
+}
+
 // Plain hashtables keep the same JSON contract as PSCustomObject without using
 // a type conversion that PowerShell ConstrainedLanguage rejects.
 #[cfg(windows)]
@@ -437,8 +505,7 @@ fn parse_offline_appx_conflict_probe(
 fn validated_delivery_optimization_file_id(value: Option<String>) -> String {
     let value = value.unwrap_or_default();
     if value.is_empty()
-        || ((40..=128).contains(&value.len())
-            && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        || ((40..=128).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
     {
         return value;
     }
@@ -561,7 +628,7 @@ if ($null -eq $activeDeployment) {{
 #[cfg(windows)]
 fn base64_encode(bytes: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut encoded = String::with_capacity(((bytes.len() + 2) / 3) * 4);
+    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let first = chunk[0];
         let second = chunk.get(1).copied().unwrap_or(0);
@@ -595,16 +662,29 @@ fn encode_powershell_command(script: &str) -> String {
 /// executable script is written to a user-writable directory; temporary paths
 /// are one-way state markers shared with the elevated watchdogs.
 #[cfg(windows)]
-fn offline_appx_recovery_script(
-    package_moniker: &str,
-    activity_id: &str,
-    file_id: &str,
-    restore_signal: &Path,
-    recovery_started_signal: &Path,
-    recovery_done_signal: &Path,
-    recovery_timed_out_signal: &Path,
+struct OfflineAppxRecoveryInputs<'a> {
+    package_moniker: &'a str,
+    activity_id: &'a str,
+    file_id: &'a str,
+    restore_signal: &'a Path,
+    recovery_started_signal: &'a Path,
+    recovery_done_signal: &'a Path,
+    recovery_timed_out_signal: &'a Path,
     recovery_deadline_unix_ms: u64,
-) -> String {
+}
+
+#[cfg(windows)]
+fn offline_appx_recovery_script(inputs: OfflineAppxRecoveryInputs<'_>) -> String {
+    let OfflineAppxRecoveryInputs {
+        package_moniker,
+        activity_id,
+        file_id,
+        restore_signal,
+        recovery_started_signal,
+        recovery_done_signal,
+        recovery_timed_out_signal,
+        recovery_deadline_unix_ms,
+    } = inputs;
     format!(
         r#"
 $ErrorActionPreference = 'Stop'
@@ -855,16 +935,16 @@ fn prepare_offline_appx_install(
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| EngineError::Install(format!("compute AppX recovery deadline: {e}")))?
         .as_millis() as u64;
-    let recovery = offline_appx_recovery_script(
+    let recovery = offline_appx_recovery_script(OfflineAppxRecoveryInputs {
         package_moniker,
-        &activity_id,
-        &file_id,
-        &restore_signal,
-        &recovery_started_signal,
-        &recovery_done_signal,
-        &recovery_timed_out_signal,
+        activity_id: &activity_id,
+        file_id: &file_id,
+        restore_signal: &restore_signal,
+        recovery_started_signal: &recovery_started_signal,
+        recovery_done_signal: &recovery_done_signal,
+        recovery_timed_out_signal: &recovery_timed_out_signal,
         recovery_deadline_unix_ms,
-    );
+    });
     let launched = match launch_elevated_recovery(&recovery) {
         Ok(launched) => launched,
         Err(err) => {
@@ -983,6 +1063,23 @@ pub fn install_msix_sideload_with_observer(
     recovery_outcome_ambiguous: &mut dyn FnMut(),
     before_install: &mut dyn FnMut() -> Result<(), EngineError>,
 ) -> Result<MsixSideloadReport, EngineError> {
+    install_msix_sideload_with_worker_observer(
+        path,
+        package_moniker,
+        recovery_outcome_ambiguous,
+        before_install,
+        &|_| {},
+    )
+}
+
+#[cfg(windows)]
+pub fn install_msix_sideload_with_worker_observer(
+    path: &Path,
+    package_moniker: &str,
+    recovery_outcome_ambiguous: &mut dyn FnMut(),
+    before_install: &mut dyn FnMut() -> Result<(), EngineError>,
+    worker_observer: &dyn Fn(AppxWorkerEvent),
+) -> Result<MsixSideloadReport, EngineError> {
     let path_display = path.display();
     log::info!("MSIX sideload start path={path_display}");
     // The mirror package is already fully downloaded and verified. Never wait
@@ -990,16 +1087,16 @@ pub fn install_msix_sideload_with_observer(
     // Windows Update Stage transaction, narrowly release it and immediately
     // submit our local MSIX. The guard restores any paused services on every
     // return path, including Add-AppxPackage timeout/failure.
-    let _restore_guard =
-        prepare_offline_appx_install(package_moniker, recovery_outcome_ambiguous)?;
+    let _restore_guard = prepare_offline_appx_install(package_moniker, recovery_outcome_ambiguous)?;
     let script = install_msix_script(path);
     // Everything above is pre-package-mutation. An optional elevated recovery
     // may have paused services, but its own watchdog restores them. The app
     // records an ambiguous package outcome from this boundary onward,
     // immediately before the child that can invoke Add-AppxPackage is started.
     before_install()?;
-    let json = run_powershell_json_with_limits(&script, RunLimits::install())
-        .map_err(|e| EngineError::Install(format!("run Add-AppxPackage: {}", e.message())))?;
+    let json =
+        run_powershell_json_with_limits_observed(&script, RunLimits::install(), worker_observer)
+            .map_err(|e| EngineError::Install(format!("run Add-AppxPackage: {}", e.message())))?;
     let mut report: MsixSideloadReport = serde_json::from_str(&json)
         .map_err(|e| EngineError::Install(format!("parse Add-AppxPackage result: {e}")))?;
     if let Some(installed) = report.installed.take() {
@@ -1039,6 +1136,20 @@ pub fn install_msix_sideload_with_observer(
     _recovery_outcome_ambiguous: &mut dyn FnMut(),
     _before_install: &mut dyn FnMut() -> Result<(), EngineError>,
 ) -> Result<MsixSideloadReport, EngineError> {
+    install_msix_sideload(path, package_moniker)
+}
+
+#[cfg(not(windows))]
+pub fn install_msix_sideload_with_worker_observer(
+    path: &Path,
+    package_moniker: &str,
+    _recovery_outcome_ambiguous: &mut dyn FnMut(),
+    _before_install: &mut dyn FnMut() -> Result<(), EngineError>,
+    worker_observer: &dyn Fn(AppxWorkerEvent),
+) -> Result<MsixSideloadReport, EngineError> {
+    worker_observer(AppxWorkerEvent::Failed {
+        error: "unsupported-platform".to_string(),
+    });
     install_msix_sideload(path, package_moniker)
 }
 
@@ -1619,9 +1730,7 @@ if ($statusOk -and $aumidResolved -and $missing.Count -eq 0) {{
     let parsed = match &run_result {
         Ok(json) => serde_json::from_str::<serde_json::Value>(json).ok(),
         Err(PowerShellRunError::Timeout(kind)) => {
-            log::info!(
-                "MSIX health check result healthy=false status=timeout kind={kind:?}"
-            );
+            log::info!("MSIX health check result healthy=false status=timeout kind={kind:?}");
             // Start-Process detaches; kill any process the timed-out probe left running.
             best_effort_close_msix_after_probe();
             return MsixHealthReport {
@@ -1855,7 +1964,8 @@ pub fn detect_portable_install(portable_root: &Path) -> Option<InstalledWindowsC
             }
         },
         Err(_) => {
-            let asar_name = crate::app_version::read_asar_package_name_from_install_root(portable_root);
+            let asar_name =
+                crate::app_version::read_asar_package_name_from_install_root(portable_root);
             if asar_name.as_deref() != Some(crate::app_version::CODEX_ASAR_PACKAGE_NAME) {
                 log::debug!(
                     "portable root at {} has no manifest and its app payload name is {:?} (expected {}); not a Codex install",
@@ -1900,13 +2010,12 @@ pub fn launch_codex_with_options(
 ) -> Result<(), EngineError> {
     if installed.source == "portable" {
         let root = Path::new(&installed.path);
-        let exe = crate::portable::installed_app_exe(root)
-            .ok_or_else(|| {
-                EngineError::Io(format!(
-                    "no app entry executable (ChatGPT.exe / Codex.exe) in {}",
-                    root.display()
-                ))
-            })?;
+        let exe = crate::portable::installed_app_exe(root).ok_or_else(|| {
+            EngineError::Io(format!(
+                "no app entry executable (ChatGPT.exe / Codex.exe) in {}",
+                root.display()
+            ))
+        })?;
         // CREATE_NO_WINDOW only suppresses a console flash; the GUI still shows.
         // Require a short liveness window so an immediate crash is reported as a
         // launch failure instead of a silent no-op.
@@ -1924,10 +2033,7 @@ pub fn launch_codex_with_options(
                 code.map(|c| c.to_string())
                     .unwrap_or_else(|| "signal".to_string())
             ))),
-            Err(err) => Err(EngineError::Io(format!(
-                "launch Codex: {}",
-                err.message()
-            ))),
+            Err(err) => Err(EngineError::Io(format!("launch Codex: {}", err.message()))),
         }
     } else {
         if options.disable_codex_self_updates {
@@ -2382,7 +2488,9 @@ function Get-AppxPackage {
             crate::process::MSIX_LIVENESS_WINDOW_SECS,
             crate::process::PORTABLE_LIVENESS_WINDOW.as_secs()
         );
-        assert!(crate::process::MSIX_ACTIVATION_WINDOW_SECS >= 20);
+        const {
+            assert!(crate::process::MSIX_ACTIVATION_WINDOW_SECS >= 20);
+        }
     }
 
     #[cfg(windows)]
@@ -2390,16 +2498,16 @@ function Get-AppxPackage {
     fn offline_appx_recovery_targets_only_the_exact_system_update_activity() {
         let detection =
             detect_offline_appx_conflict_script("OpenAI.Codex_26.715.2305.0_x64__2p2nqsd0c76g0");
-        let recovery = offline_appx_recovery_script(
-            "OpenAI.Codex_26.715.2305.0_x64__2p2nqsd0c76g0",
-            "{9afe3240-101d-0002-37b9-8aa11d10dd01}",
-            "4cecd7e61f209785343c5808b459e94818b9627f",
-            Path::new(r"C:\Temp\codex.restore"),
-            Path::new(r"C:\Temp\codex.recovery-started"),
-            Path::new(r"C:\Temp\codex.recovery-done"),
-            Path::new(r"C:\Temp\codex.recovery-timed-out"),
-            1_800_000_000_000,
-        );
+        let recovery = offline_appx_recovery_script(OfflineAppxRecoveryInputs {
+            package_moniker: "OpenAI.Codex_26.715.2305.0_x64__2p2nqsd0c76g0",
+            activity_id: "{9afe3240-101d-0002-37b9-8aa11d10dd01}",
+            file_id: "4cecd7e61f209785343c5808b459e94818b9627f",
+            restore_signal: Path::new(r"C:\Temp\codex.restore"),
+            recovery_started_signal: Path::new(r"C:\Temp\codex.recovery-started"),
+            recovery_done_signal: Path::new(r"C:\Temp\codex.recovery-done"),
+            recovery_timed_out_signal: Path::new(r"C:\Temp\codex.recovery-timed-out"),
+            recovery_deadline_unix_ms: 1_800_000_000_000,
+        });
         for script in [&detection, &recovery] {
             assert!(script.contains("MainPackageMoniker"));
             assert!(script.contains("ActivityID"));
@@ -2440,9 +2548,7 @@ function Get-AppxPackage {
                     .find("Stop-Service -Name $name")
                     .expect("service stop must follow watchdog")
         );
-        assert!(recovery.contains(
-            "@('InstallService', 'wuauserv', 'DoSvc', 'AppXSvc', 'ClipSVC')"
-        ));
+        assert!(recovery.contains("@('InstallService', 'wuauserv', 'DoSvc', 'AppXSvc', 'ClipSVC')"));
         assert!(
             std::time::Duration::from_secs(OFFLINE_APPX_RESTORE_WATCHDOG_SECS)
                 > crate::process::APPX_RECOVERY_TIMEOUT + crate::process::INSTALL_TIMEOUT
@@ -2504,16 +2610,16 @@ function Get-AppxPackage {
     #[cfg(windows)]
     #[test]
     fn offline_appx_elevated_helper_is_valid_powershell() {
-        let recovery = offline_appx_recovery_script(
-            "OpenAI.Codex_26.715.2305.0_x64__2p2nqsd0c76g0",
-            "{9afe3240-101d-0002-37b9-8aa11d10dd01}",
-            "4cecd7e61f209785343c5808b459e94818b9627f",
-            Path::new(r"C:\Temp\codex.restore"),
-            Path::new(r"C:\Temp\codex.recovery-started"),
-            Path::new(r"C:\Temp\codex.recovery-done"),
-            Path::new(r"C:\Temp\codex.recovery-timed-out"),
-            1_800_000_000_000,
-        );
+        let recovery = offline_appx_recovery_script(OfflineAppxRecoveryInputs {
+            package_moniker: "OpenAI.Codex_26.715.2305.0_x64__2p2nqsd0c76g0",
+            activity_id: "{9afe3240-101d-0002-37b9-8aa11d10dd01}",
+            file_id: "4cecd7e61f209785343c5808b459e94818b9627f",
+            restore_signal: Path::new(r"C:\Temp\codex.restore"),
+            recovery_started_signal: Path::new(r"C:\Temp\codex.recovery-started"),
+            recovery_done_signal: Path::new(r"C:\Temp\codex.recovery-done"),
+            recovery_timed_out_signal: Path::new(r"C:\Temp\codex.recovery-timed-out"),
+            recovery_deadline_unix_ms: 1_800_000_000_000,
+        });
         let script = format!(
             "$null = [scriptblock]::Create({}); @{{ ok = $true }} | ConvertTo-Json -Compress",
             ps_quote(&recovery)

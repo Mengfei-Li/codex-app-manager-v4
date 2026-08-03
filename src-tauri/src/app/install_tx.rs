@@ -68,10 +68,7 @@ impl InstallTxStep {
     }
 
     pub fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            Self::Completed | Self::RolledBack | Self::NeedsManual
-        )
+        matches!(self, Self::Completed | Self::RolledBack | Self::NeedsManual)
     }
 }
 
@@ -306,8 +303,8 @@ impl InstallTransaction {
     }
 
     pub fn load_from_path(path: &Path) -> Result<Self, AppError> {
-        let bytes = fs::read(path)
-            .map_err(|e| AppError::Internal(format!("读取事务日志失败: {e}")))?;
+        let bytes =
+            fs::read(path).map_err(|e| AppError::Internal(format!("读取事务日志失败: {e}")))?;
         serde_json::from_slice(&bytes)
             .map_err(|e| AppError::Internal(format!("解析事务日志失败: {e}")))
     }
@@ -347,7 +344,10 @@ pub fn protected_paths() -> Vec<PathBuf> {
         let Ok(tx) = InstallTransaction::load_from_path(&path) else {
             continue;
         };
-        if matches!(tx.step, InstallTxStep::Completed | InstallTxStep::RolledBack) {
+        if matches!(
+            tx.step,
+            InstallTxStep::Completed | InstallTxStep::RolledBack
+        ) {
             continue;
         }
         for raw in [&tx.install_path, &tx.new_path, &tx.backup_path] {
@@ -358,10 +358,7 @@ pub fn protected_paths() -> Vec<PathBuf> {
             let p = PathBuf::from(raw);
             let mut cur = p.parent();
             while let Some(parent) = cur {
-                let name = parent
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("");
+                let name = parent.file_name().and_then(|n| n.to_str()).unwrap_or("");
                 let staging_ish = name.starts_with("update-")
                     || name.starts_with("portable-")
                     || name == ".codex-app-manager-staging"
@@ -382,7 +379,9 @@ pub fn protected_paths() -> Vec<PathBuf> {
 /// Whether `path` is covered by a pending install transaction and must not be
 /// reclaimed by staging cleanup.
 pub fn path_is_protected(path: &Path, protected: &[PathBuf]) -> bool {
-    protected.iter().any(|p| path == p || path.starts_with(p) || p.starts_with(path))
+    protected
+        .iter()
+        .any(|p| path == p || path.starts_with(p) || p.starts_with(path))
 }
 
 /// Scan pending transaction logs and apply the recovery matrix. Must run
@@ -398,9 +397,7 @@ pub fn recover_pending_transactions(
         match ops.begin(crate::app::oplock::OperationKind::Install) {
             Ok(guard) => Some(guard),
             Err(err) => {
-                log::warn!(
-                    "install transaction recovery deferred (operation busy) error={err}"
-                );
+                log::warn!("install transaction recovery deferred (operation busy) error={err}");
                 return summary;
             }
         }
@@ -467,7 +464,11 @@ fn path_exists(p: &str) -> bool {
 
 fn recover_one(path: &Path) -> Result<Recovered, AppError> {
     let mut tx = InstallTransaction::load_from_path(path)?;
-    if tx.step.is_terminal() && matches!(tx.step, InstallTxStep::Completed | InstallTxStep::RolledBack)
+    if tx.step.is_terminal()
+        && matches!(
+            tx.step,
+            InstallTxStep::Completed | InstallTxStep::RolledBack
+        )
     {
         let _ = fs::remove_file(path);
         return Ok(Recovered::Cleared);
@@ -493,9 +494,8 @@ fn recover_one(path: &Path) -> Result<Recovered, AppError> {
             Ok(Recovered::Cleared)
         }
         RecoveryAction::ContinueInstall => {
-            fs::rename(&tx.new_path, &tx.install_path).map_err(|e| {
-                AppError::Internal(format!("recovery continue rename failed: {e}"))
-            })?;
+            fs::rename(&tx.new_path, &tx.install_path)
+                .map_err(|e| AppError::Internal(format!("recovery continue rename failed: {e}")))?;
             tx.advance(InstallTxStep::NewInstalled)?;
             cleanup_backup_best_effort(&tx);
             tx.complete()?;
@@ -506,9 +506,8 @@ fn recover_one(path: &Path) -> Result<Recovered, AppError> {
                 let _ = fs::remove_dir_all(&tx.install_path);
                 let _ = fs::remove_file(&tx.install_path);
             }
-            fs::rename(&tx.backup_path, &tx.install_path).map_err(|e| {
-                AppError::Internal(format!("recovery rollback rename failed: {e}"))
-            })?;
+            fs::rename(&tx.backup_path, &tx.install_path)
+                .map_err(|e| AppError::Internal(format!("recovery rollback rename failed: {e}")))?;
             tx.step = InstallTxStep::RolledBack;
             tx.updated_unix = now_unix();
             let _ = tx.persist();

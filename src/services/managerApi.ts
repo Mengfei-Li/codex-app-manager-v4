@@ -357,6 +357,7 @@ const WIN_FALLBACK_PERFORM: WinPerformReport = {
     fallbackRecommended: false,
     rawError: null,
   },
+  webInstaller: null,
   portable: null,
   msixHealth: { healthy: true, verified: true, packageRegistered: true, status: "Ok", statusOk: true, aumidResolved: true, missingDependencies: [], activationOk: true, failureKind: "", reason: "" },
   installed: {

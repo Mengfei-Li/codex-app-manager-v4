@@ -1,0 +1,100 @@
+name: G2 platform kernel
+
+# Four native architectures plus deterministic fault suites. This workflow is
+# the G2 evidence producer; signed-device installation remains the later G6
+# gate and is intentionally not weakened by unsigned CI substitutes.
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/v4-main]
+  pull_request:
+    paths:
+      - "crates/**"
+      - "src-tauri/**"
+      - "src/**"
+      - "scripts/g2-write-evidence.mjs"
+      - ".github/workflows/g2-platform-kernel.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: g2-platform-kernel-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-kernel:
+    name: ${{ matrix.name }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            runner: windows-2025
+            target: x86_64-pc-windows-msvc
+          - name: windows-arm64
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+          - name: macos-arm64
+            runner: macos-15
+            target: aarch64-apple-darwin
+          - name: macos-x64
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: 24.16.0
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4  # stable
+        with:
+          toolchain: 1.97.1
+          targets: ${{ matrix.target }}
+          components: clippy
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
+        with:
+          workspaces: |
+            src-tauri -> target
+            crates/codex-win-engine -> target
+            crates/codex-mac-engine -> target
+
+      - run: npm ci
+      - name: Frontend contract and bundle
+        run: npm run build
+
+      - name: Windows engine fault suite
+        run: cargo test --manifest-path crates/codex-win-engine/Cargo.toml --all-targets -- --test-threads=1
+
+      - name: macOS engine fault suite
+        run: cargo test --manifest-path crates/codex-mac-engine/Cargo.toml --all-targets -- --test-threads=1
+
+      - name: Manager transaction, journal, reboot and worker suites
+        run: cargo test --manifest-path src-tauri/Cargo.toml --workspace -- --test-threads=1
+
+      - name: Native target compile
+        run: cargo build --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }}
+
+      - name: Write immutable G2 evidence summary
+        env:
+          G2_NAME: ${{ matrix.name }}
+          G2_RUNNER: ${{ matrix.runner }}
+          G2_TARGET: ${{ matrix.target }}
+          G2_SHA: ${{ github.sha }}
+          G2_RUN_ID: ${{ github.run_id }}
+        run: node scripts/g2-write-evidence.mjs
+
+      - name: Upload G2 evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        with:
+          name: g2-platform-${{ matrix.name }}
+          path: artifacts/g2/${{ matrix.name }}.json
+          if-no-files-found: error
+          retention-days: 30

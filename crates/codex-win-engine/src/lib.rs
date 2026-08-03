@@ -26,13 +26,13 @@ pub mod portable;
 mod process;
 pub mod sys;
 pub mod version;
+pub mod web_installer;
 mod windows_process;
 
-pub use app_version::{
-    read_codex_app_version_from_asar, read_codex_app_version_from_install_root,
-};
+pub use app_version::{read_codex_app_version_from_asar, read_codex_app_version_from_install_root};
 pub use authenticode::{
-    verify_openai_authenticode, AuthenticodeReport, OPENAI_MARKETPLACE_PUBLISHER_SUBJECT,
+    verify_microsoft_web_installer_authenticode, verify_openai_authenticode, AuthenticodeReport,
+    MICROSOFT_WEB_INSTALLER_PUBLISHER_SUBJECT, OPENAI_MARKETPLACE_PUBLISHER_SUBJECT,
 };
 pub use capability::{
     CapabilityCheck, CapabilityState, SideloadRecommendation, WinCapabilityReport,
@@ -64,13 +64,18 @@ pub use sys::{
     remove_msix_package, InstalledWindowsCodex, LaunchOptions, MsixRemoveReport,
 };
 pub use sys::{
-    install_msix_sideload, install_msix_sideload_with_observer, precheck_msix_dependencies,
-    verify_msix_health, verify_msix_health_with_options, MsixDependencyPrecheck, MsixHealthReport,
+    install_msix_sideload, install_msix_sideload_with_observer,
+    install_msix_sideload_with_worker_observer, precheck_msix_dependencies, verify_msix_health,
+    verify_msix_health_with_options, AppxWorkerEvent, MsixDependencyPrecheck, MsixHealthReport,
     MsixSideloadReport,
 };
 // Failure-kind constants for structured MSIX health outcomes.
 pub use sys::msix_failure;
 pub use version::{compare_versions, version_key};
+pub use web_installer::{
+    download_and_verify_official_web_installer, execute_official_web_installer,
+    WebInstallerExecution, OFFICIAL_CODEX_WEB_INSTALLER_URL,
+};
 pub use windows_process::same_windows_path;
 
 pub const OPENAI_PACKAGE_IDENTITY: &str = "OpenAI.Codex";

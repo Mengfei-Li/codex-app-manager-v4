@@ -1,3 +1,4 @@
+pub mod appx_worker_artifact;
 pub mod atomic_file;
 pub mod codex_self_update;
 pub mod config_health;
@@ -7,10 +8,12 @@ pub mod install_tx;
 pub mod logging;
 pub mod mac_update;
 pub mod op_phase;
+pub mod operation_journal;
 pub mod operation_outcome;
 pub mod oplock;
 pub mod paths;
 pub mod provenance;
+pub mod reboot_continuation;
 pub mod settings_store;
 pub mod shell;
 pub mod staging;

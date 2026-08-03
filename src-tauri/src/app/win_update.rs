@@ -14,17 +14,18 @@ use serde::{Deserialize, Serialize};
 use codex_win_engine::{
     cancel_active_download, cleanup_portable_metadata, close_codex_gracefully_for_root,
     close_msix_codex_processes, codex_running_for_root, detect_installed_codex,
-    detect_portable_install,
-    download_to_with_progress_bounded_with_network, fetch_text_with_network, find_msix_sha256,
-    install_msix_sideload_with_observer, install_portable_from_msix_with_observer,
-    limits::MAX_PACKAGE_BYTES, parse_manifest, pause_active_download, plan_update,
-    precheck_msix_dependencies, probe_capabilities, purge_codex_user_data, read_msix_identity,
-    remove_msix_package, sha256_file, uninstall_portable, validate_codex_identity,
-    verify_msix_health_with_options, verify_openai_authenticode, version_key, AuthenticodeReport,
-    CapabilityState, EngineError, InstalledWindowsCodex, MsixHealthReport, MsixIdentity,
-    MsixRemoveReport, MsixSideloadReport, NetworkConfig, PortableBoundary, PortableInstallReport,
-    PortableUninstallReport, WinCapabilityReport, WinInstallRoute, WindowsRelease,
-    WindowsUpdatePlan,
+    detect_portable_install, download_and_verify_official_web_installer,
+    download_to_with_progress_bounded_with_network, execute_official_web_installer,
+    fetch_text_with_network, find_msix_sha256, install_msix_sideload_with_worker_observer,
+    install_portable_from_msix_with_observer, limits::MAX_PACKAGE_BYTES, parse_manifest,
+    pause_active_download, plan_update, precheck_msix_dependencies, probe_capabilities,
+    purge_codex_user_data, read_msix_identity, remove_msix_package, sha256_file,
+    uninstall_portable, validate_codex_identity, verify_msix_health_with_options,
+    verify_openai_authenticode, version_key, AuthenticodeReport, CapabilityState, EngineError,
+    InstalledWindowsCodex, MsixHealthReport, MsixIdentity, MsixRemoveReport, MsixSideloadReport,
+    NetworkConfig, PortableBoundary, PortableInstallReport, PortableUninstallReport,
+    WebInstallerExecution, WinCapabilityReport, WinInstallRoute, WindowsRelease, WindowsUpdatePlan,
+    OFFICIAL_CODEX_WEB_INSTALLER_URL,
 };
 
 use crate::app::install_tx::{ActiveInstallTx, InstallTxKind};
@@ -107,6 +108,7 @@ pub struct WinPerformReport {
     pub message: String,
     pub stage: WinStageReport,
     pub sideload: Option<MsixSideloadReport>,
+    pub web_installer: Option<WinWebInstallerReport>,
     pub portable: Option<PortableInstallReport>,
     pub msix_health: Option<MsixHealthReport>,
     pub installed: Option<InstalledWindowsCodex>,
@@ -122,11 +124,21 @@ pub struct WinPerformReport {
 #[serde(rename_all = "kebab-case")]
 pub enum WinPerformAction {
     None,
+    OfficialWebInstaller,
     MsixSideload,
     PortableFallback,
     PortableFallbackAfterMsixFailure,
     PortableFallbackAfterMsixUnhealthy,
     PortableFallbackMissingFramework,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WinWebInstallerReport {
+    pub url: String,
+    pub authenticode: AuthenticodeReport,
+    pub execution: WebInstallerExecution,
+    pub health: MsixHealthReport,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -142,6 +154,7 @@ impl WinPerformAction {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::None => "none",
+            Self::OfficialWebInstaller => "official-web-installer",
             Self::MsixSideload => "msix-sideload",
             Self::PortableFallback => "portable-fallback",
             Self::PortableFallbackAfterMsixFailure => "portable-fallback-after-msix-failure",
@@ -194,6 +207,47 @@ fn engine_err(err: impl ToString) -> AppError {
     AppError::Engine(err.to_string())
 }
 
+fn appx_error_allows_reboot_continuation(error: &EngineError) -> bool {
+    let text = error.to_string().to_ascii_lowercase();
+    [
+        "appx",
+        "add-appxpackage",
+        "windows update",
+        "deployment",
+        "system windows",
+        "deadline",
+        "timeout",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
+}
+
+fn schedule_reboot_continuation(
+    stage: &WinStageReport,
+    install_mode: &str,
+    reason: String,
+) -> Result<String, AppError> {
+    let store = crate::app::reboot_continuation::default_store().ok_or_else(|| {
+        AppError::Engine("无法定位本地数据目录，不能创建重启续装票据".to_string())
+    })?;
+    let payload = store
+        .create(
+            reason,
+            install_mode.to_string(),
+            stage.package_moniker.clone(),
+            stage.latest_version.clone(),
+            crate::app::reboot_continuation::now_unix(),
+        )
+        .map_err(|error| AppError::Engine(format!("创建重启续装票据失败: {error}")))?;
+    crate::app::reboot_continuation::schedule_run_once(&payload.receipt_id).map_err(|error| {
+        AppError::Engine(format!(
+            "重启续装票据已保存，但注册一次性登录恢复入口失败（票据 {}）: {error}",
+            payload.receipt_id
+        ))
+    })?;
+    Ok(payload.receipt_id)
+}
+
 /// Record a managed install without failing the primary install/update when the
 /// provenance store cannot be written. Surfaces the failure via [`OperationOutcome`].
 fn record_managed_install(
@@ -201,8 +255,8 @@ fn record_managed_install(
     installed: &InstalledWindowsCodex,
     source: &str,
 ) -> OperationOutcome {
-    let mut outcome =
-        OperationOutcome::full_success("present", Some("managed")).with_path(installed.path.clone());
+    let mut outcome = OperationOutcome::full_success("present", Some("managed"))
+        .with_path(installed.path.clone());
     outcome.cleanup = StepOutcome::not_applicable();
     let mut store = ProvenanceStore::load();
     if let Some(previous) = previous {
@@ -279,7 +333,9 @@ fn outcome_from_portable_uninstall(
     if outcome.cleanup.is_failed() {
         // Shortcut / uninstall-entry failures.
         if portable.notes.iter().any(|n| {
-            n.contains("Start Menu") || n.contains("Apps & Features") || n.contains("uninstall entry")
+            n.contains("Start Menu")
+                || n.contains("Apps & Features")
+                || n.contains("uninstall entry")
         }) {
             outcome.push_recovery(recovery::CLEANUP_METADATA);
         }
@@ -434,7 +490,15 @@ fn close_existing_codex_before_portable_fallback(
     settings: &AppSettings,
     previous_installed: Option<&InstalledWindowsCodex>,
 ) -> Result<(), AppError> {
-    log::info!("Windows portable fallback close existing source=portable-fallback");
+    close_existing_codex_before_install(settings, previous_installed, "portable-fallback")
+}
+
+fn close_existing_codex_before_install(
+    settings: &AppSettings,
+    previous_installed: Option<&InstalledWindowsCodex>,
+    source: &str,
+) -> Result<(), AppError> {
+    log::info!("Windows close existing before install source={source}");
     if let Some(installed) = detect_installed_codex(PathBuf::from(&settings.install_root).as_path())
     {
         if installed.source == "msix" {
@@ -1097,7 +1161,7 @@ pub fn perform_windows_update_with_install_mode_network_and_phase(
     }
 
     set_phase(OperationPhase::Downloading);
-    let stage = stage_windows_update_with_install_mode_and_network(
+    let mut stage = stage_windows_update_with_install_mode_and_network(
         endpoints,
         settings,
         install_mode,
@@ -1121,6 +1185,7 @@ pub fn perform_windows_update_with_install_mode_network_and_phase(
             message: "Windows Codex is already current.".to_string(),
             installed: win_install_status(settings).installed,
             sideload: None,
+            web_installer: None,
             portable: None,
             msix_health: None,
             fallback_available: stage.portable_fallback_ready,
@@ -1142,6 +1207,104 @@ pub fn perform_windows_update_with_install_mode_network_and_phase(
     // Codex. Both MSIX and portable installs perform a real launch health check;
     // this decides whether that checked process remains open afterward.
     let was_running = existing_codex_was_running(settings, current_installed.as_ref())?;
+    let mut web_installer_report: Option<WinWebInstallerReport> = None;
+
+    // Prefer Microsoft's official Store Web Installer when the MSIX route is
+    // viable. The verified offline MSIX is already staged and remains the
+    // deterministic fallback for blocked Store services, WDAC, proxy, timeout,
+    // or installer failure. This route is intentionally skipped for an
+    // explicitly selected portable install.
+    if stage.route == "msix-sideload" && install_mode == "msix" {
+        let web_path = staging::download_cache_path(
+            OFFICIAL_CODEX_WEB_INSTALLER_URL,
+            "Codex-Official-Web-Installer.exe",
+        )?;
+        let web_download =
+            download_and_verify_official_web_installer(&web_path, network, &|downloaded| {
+                progress(DownloadProgress {
+                    downloaded,
+                    total: 0,
+                    source: "get.microsoft.com".to_string(),
+                });
+            });
+        match web_download {
+            Err(error) => {
+                log::warn!("official Web Installer unavailable; continuing with offline MSIX error={error}");
+                stage.notes.push(format!(
+                    "Microsoft 官方在线安装不可用（{error}）；已自动切换到已验证的离线 MSIX。"
+                ));
+            }
+            Ok(authenticode) => {
+                set_phase(OperationPhase::Committing);
+                check_win_update_abort()?;
+                close_existing_codex_before_install(
+                    settings,
+                    current_installed.as_ref(),
+                    "official-web-installer",
+                )?;
+                if let Some(hook) = evidence {
+                    hook(OperationEvidence::OutcomeAmbiguous);
+                }
+                match execute_official_web_installer(&web_path) {
+                    Err(error) => {
+                        log::warn!("official Web Installer execution failed; continuing with offline MSIX error={error}");
+                        stage.notes.push(format!(
+                            "Microsoft 官方在线安装器执行失败（{error}）；已自动切换到已验证的离线 MSIX。"
+                        ));
+                    }
+                    Ok(execution) => {
+                        let health = verify_msix_health_with_options(was_running);
+                        web_installer_report = Some(WinWebInstallerReport {
+                            url: OFFICIAL_CODEX_WEB_INSTALLER_URL.to_string(),
+                            authenticode,
+                            execution: execution.clone(),
+                            health: health.clone(),
+                        });
+                        if health.healthy {
+                            let installed = detect_installed_codex(
+                                PathBuf::from(&settings.install_root).as_path(),
+                            )
+                            .or_else(|| win_install_status(settings).installed);
+                            if let Some(installed) = installed {
+                                let outcome = record_managed_install(
+                                    current_installed.as_ref(),
+                                    &installed,
+                                    "manager-official-web-installer",
+                                );
+                                let mut notes = stage.notes.clone();
+                                notes.extend(outcome.warnings.iter().cloned());
+                                let report = WinPerformReport {
+                                    success: true,
+                                    action: WinPerformAction::OfficialWebInstaller,
+                                    message: if execution.success {
+                                        "Microsoft 官方在线安装完成并通过启动健康检查。".to_string()
+                                    } else {
+                                        "Microsoft 官方在线安装器返回非零状态，但安装结果已通过身份与启动健康检查。".to_string()
+                                    },
+                                    stage,
+                                    sideload: None,
+                                    web_installer: web_installer_report,
+                                    portable: None,
+                                    msix_health: Some(health),
+                                    installed: Some(installed),
+                                    fallback_available: true,
+                                    fallback_attempted: false,
+                                    notes,
+                                    outcome,
+                                };
+                                log::info!("Windows perform success action=official-web-installer");
+                                return Ok(report);
+                            }
+                        }
+                        stage.notes.push(format!(
+                            "Microsoft 官方在线安装未得到可验证的健康安装（{}）；已自动切换到已验证的离线 MSIX。",
+                            health.reason
+                        ));
+                    }
+                }
+            }
+        }
+    }
 
     // Point of no return. Honor a cancel one last time BEFORE closing Codex or
     // sideloading — closes the gap after staging where a fully-cached MSIX skips
@@ -1162,6 +1325,7 @@ pub fn perform_windows_update_with_install_mode_network_and_phase(
             None,
             was_running,
             current_installed,
+            web_installer_report,
             phase,
             evidence,
         );
@@ -1200,6 +1364,7 @@ pub fn perform_windows_update_with_install_mode_network_and_phase(
             None,
             was_running,
             current_installed,
+            web_installer_report,
             phase,
             evidence,
         )?;
@@ -1239,13 +1404,71 @@ pub fn perform_windows_update_with_install_mode_network_and_phase(
         }
         Ok(())
     };
-    let sideload = install_msix_sideload_with_observer(
+    let appx_artifact = match crate::app::appx_worker_artifact::AppxWorkerArtifactHandle::start(
+        &stage.package_moniker,
+    ) {
+        Ok(artifact) => Some(artifact),
+        Err(error) => {
+            // Diagnostics must never become a new installation dependency.
+            // The parent operation journal still records the initialization
+            // failure, while the verified AppX/Portable install proceeds.
+            log::error!("failed to initialize AppX worker artifact error={error}");
+            None
+        }
+    };
+    let sideload = match install_msix_sideload_with_worker_observer(
         PathBuf::from(&staged_path).as_path(),
         &stage.package_moniker,
         &mut mark_recovery_ambiguous,
         &mut close_codex_and_mark_install_started,
-    )
-    .map_err(engine_err)?;
+        &|event| {
+            if let Some(artifact) = &appx_artifact {
+                artifact.observe(event);
+            }
+        },
+    ) {
+        Ok(report) => report,
+        Err(sideload_error) => {
+            let mut fallback_stage = stage.clone();
+            fallback_stage.notes.push(format!(
+                "离线 AppX 安装引擎失败（{sideload_error}）；正在使用同一已验证 MSIX 的 Portable 事务安装。"
+            ));
+            let fallback = install_portable_after_stage(
+                settings,
+                fallback_stage,
+                None,
+                None,
+                was_running,
+                current_installed,
+                web_installer_report,
+                phase,
+                evidence,
+            );
+            match fallback {
+                Ok(mut report) => {
+                    report.notes.push(format!(
+                        "离线 AppX 安装引擎错误已由 Portable 回退吸收: {sideload_error}"
+                    ));
+                    return Ok(report);
+                }
+                Err(fallback_error) => {
+                    if appx_error_allows_reboot_continuation(&sideload_error)
+                        && !crate::app::reboot_continuation::resume_attempt_active()
+                    {
+                        let reason = format!("AppX={sideload_error}; Portable={fallback_error}");
+                        let receipt_id =
+                            schedule_reboot_continuation(&stage, install_mode, reason)?;
+                        return Err(AppError::Engine(format!(
+                            "在线安装、离线 AppX 与 Portable 回退均未完成；已创建一次性重启续装（票据 {receipt_id}）。重启并登录后管理器会自动继续，最多尝试一次。"
+                        )));
+                    }
+                    return Err(AppError::Engine(format!(
+                        "离线 AppX 安装失败（{sideload_error}），Portable 回退也失败（{fallback_error}）"
+                    )));
+                }
+            }
+        }
+    };
 
     if sideload.success {
         // Add-AppxPackage returning success only means the cmdlet didn't throw.
@@ -1281,6 +1504,7 @@ pub fn perform_windows_update_with_install_mode_network_and_phase(
                 Some(health),
                 was_running,
                 current_installed,
+                web_installer_report,
                 phase,
                 evidence,
             )?;
@@ -1331,9 +1555,7 @@ pub fn perform_windows_update_with_install_mode_network_and_phase(
                     app_state: "unknown".to_string(),
                     install_class: None,
                     path: None,
-                    provenance: StepOutcome::failed(
-                        "安装完成但未检测到可记录的安装，托管状态未知",
-                    ),
+                    provenance: StepOutcome::failed("安装完成但未检测到可记录的安装，托管状态未知"),
                     cleanup: StepOutcome::not_applicable(),
                     warnings: vec![
                         "MSIX sideload reported success but no install was detected afterward."
@@ -1363,6 +1585,7 @@ pub fn perform_windows_update_with_install_mode_network_and_phase(
             },
             installed,
             sideload: Some(sideload),
+            web_installer: web_installer_report,
             portable: None,
             msix_health: Some(health),
             fallback_available: stage.portable_fallback_ready,
@@ -1388,6 +1611,7 @@ pub fn perform_windows_update_with_install_mode_network_and_phase(
         None,
         was_running,
         current_installed,
+        web_installer_report,
         phase,
         evidence,
     )
@@ -1401,6 +1625,7 @@ fn install_portable_after_stage(
     health: Option<MsixHealthReport>,
     relaunch: bool,
     previous_installed: Option<InstalledWindowsCodex>,
+    web_installer: Option<WinWebInstallerReport>,
     phase: Option<&PhaseHook<'_>>,
     evidence: Option<&EvidenceHook<'_>>,
 ) -> Result<WinPerformReport, AppError> {
@@ -1523,9 +1748,7 @@ fn install_portable_after_stage(
             },
             install_class: None,
             path: Some(install_root.clone()),
-            provenance: StepOutcome::failed(
-                "便携安装完成但未检测到可记录的安装，托管状态未知",
-            ),
+            provenance: StepOutcome::failed("便携安装完成但未检测到可记录的安装，托管状态未知"),
             cleanup: StepOutcome::not_applicable(),
             warnings: vec![
                 "Portable install finished but no install was detected for provenance.".to_string(),
@@ -1573,6 +1796,7 @@ fn install_portable_after_stage(
         },
         installed,
         sideload,
+        web_installer,
         portable: Some(portable),
         msix_health: health,
         fallback_available: true,
@@ -1808,7 +2032,10 @@ pub fn uninstall_windows_codex(
             success: msix.success,
             action: "remove-msix".to_string(),
             message: if outcome.is_partial() {
-                format!("{}（主卸载已完成，附属步骤有失败 — 可仅重试清理）", msix.message)
+                format!(
+                    "{}（主卸载已完成，附属步骤有失败 — 可仅重试清理）",
+                    msix.message
+                )
             } else {
                 msix.message.clone()
             },
@@ -1835,8 +2062,7 @@ pub fn uninstall_windows_codex(
             provenance = StepOutcome::failed(format!("托管记录清除失败（{e}）"));
         }
     }
-    let outcome =
-        outcome_from_portable_uninstall(&portable, provenance, &installed_before.path);
+    let outcome = outcome_from_portable_uninstall(&portable, provenance, &installed_before.path);
     let mut notes = portable.notes.clone();
     notes.extend(outcome.warnings.iter().cloned());
     let report = WinUninstallReport {
@@ -2003,7 +2229,7 @@ mod tests {
         bind_manifest_checksums, check_win_update_abort, detect_existing_windows_install_at_path,
         detect_managed_codex, outcome_from_portable_uninstall,
         portable_boundary_mutated_install_root, retry_windows_ancillary_with_detector,
-        WinAbortGuard, WinPerformAction, WinInstallStatus, WIN_UPDATE_ABORT,
+        WinAbortGuard, WinInstallStatus, WinPerformAction, WIN_UPDATE_ABORT,
     };
     use crate::app::operation_outcome::{recovery, StepOutcome};
     use crate::app::provenance::ProvenanceStore;
@@ -2120,6 +2346,10 @@ mod tests {
     fn serializes_win_perform_actions_as_frontend_contract() {
         let cases = [
             (WinPerformAction::None, "\"none\""),
+            (
+                WinPerformAction::OfficialWebInstaller,
+                "\"official-web-installer\"",
+            ),
             (WinPerformAction::MsixSideload, "\"msix-sideload\""),
             (WinPerformAction::PortableFallback, "\"portable-fallback\""),
             (
@@ -2284,11 +2514,7 @@ aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  OpenAI.Codex_2
             message: "cleanup warnings".into(),
             notes: vec!["Start Menu shortcut cleanup failed: access denied".into()],
         };
-        let outcome = outcome_from_portable_uninstall(
-            &portable,
-            StepOutcome::ok(),
-            r"C:\Codex",
-        );
+        let outcome = outcome_from_portable_uninstall(&portable, StepOutcome::ok(), r"C:\Codex");
         assert!(outcome.primary_ok, "absent tree is still primary success");
         assert_eq!(outcome.app_state, "absent");
         assert_eq!(outcome.path.as_deref(), Some(r"C:\Codex"));
@@ -2314,11 +2540,7 @@ aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  OpenAI.Codex_2
             message: "cleanup warnings".into(),
             notes: vec!["User data cleanup failed: access denied".into()],
         };
-        let outcome = outcome_from_portable_uninstall(
-            &portable,
-            StepOutcome::ok(),
-            r"C:\Codex",
-        );
+        let outcome = outcome_from_portable_uninstall(&portable, StepOutcome::ok(), r"C:\Codex");
         assert!(outcome.primary_ok);
         assert!(outcome.is_partial());
         assert!(outcome
@@ -2340,8 +2562,7 @@ aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  OpenAI.Codex_2
             message: "remove failed".into(),
             notes: vec![],
         };
-        let outcome =
-            outcome_from_portable_uninstall(&portable, StepOutcome::ok(), r"C:\Codex");
+        let outcome = outcome_from_portable_uninstall(&portable, StepOutcome::ok(), r"C:\Codex");
         assert!(!outcome.primary_ok);
         assert!(!outcome.is_partial());
         assert_eq!(outcome.app_state, "present");
@@ -2366,6 +2587,5 @@ aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  OpenAI.Codex_2
             .recovery_actions
             .iter()
             .any(|action| action == recovery::RECORD_PROVENANCE));
-
     }
 }

@@ -173,6 +173,28 @@ fn asar_entry_size(entry: &Value) -> Option<u64> {
     entry.get("size")?.as_u64()
 }
 
+// Shared with sys.rs's manifest-less portable detection tests.
+#[cfg(test)]
+pub(crate) fn write_test_asar(path: &Path, package_json: &[u8]) {
+    let header_json = format!(
+        r#"{{"files":{{"package.json":{{"size":{},"offset":"0"}}}}}}"#,
+        package_json.len()
+    );
+    let mut header = Vec::new();
+    header.extend_from_slice(&0_u32.to_le_bytes());
+    header.extend_from_slice(header_json.as_bytes());
+    while header.len() % 4 != 0 {
+        header.push(0);
+    }
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&4_u32.to_le_bytes());
+    out.extend_from_slice(&(header.len() as u32).to_le_bytes());
+    out.extend_from_slice(&header);
+    out.extend_from_slice(package_json);
+    std::fs::write(path, out).unwrap();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,8 +237,7 @@ mod tests {
 
     #[test]
     fn reads_asar_package_name_from_install_root() {
-        let dir =
-            std::env::temp_dir().join(format!("codex-asar-name-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("codex-asar-name-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let resources = dir.join("resources");
         std::fs::create_dir_all(&resources).unwrap();
@@ -232,26 +253,4 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
-}
-
-// Shared with sys.rs's manifest-less portable detection tests.
-#[cfg(test)]
-pub(crate) fn write_test_asar(path: &Path, package_json: &[u8]) {
-    let header_json = format!(
-        r#"{{"files":{{"package.json":{{"size":{},"offset":"0"}}}}}}"#,
-        package_json.len()
-    );
-    let mut header = Vec::new();
-    header.extend_from_slice(&0_u32.to_le_bytes());
-    header.extend_from_slice(header_json.as_bytes());
-    while header.len() % 4 != 0 {
-        header.push(0);
-    }
-
-    let mut out = Vec::new();
-    out.extend_from_slice(&4_u32.to_le_bytes());
-    out.extend_from_slice(&(header.len() as u32).to_le_bytes());
-    out.extend_from_slice(&header);
-    out.extend_from_slice(package_json);
-    std::fs::write(path, out).unwrap();
 }

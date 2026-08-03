@@ -1,7 +1,7 @@
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 #[cfg(windows)]
 use std::path::PathBuf;
-use serde::{Deserialize, Serialize};
 
 #[cfg(windows)]
 use crate::process::{hidden_command, run_capturing, RunLimits};
@@ -9,8 +9,9 @@ use crate::EngineError;
 
 // The mirror currently serves Store-re-signed MSIX packages; add a separate
 // exact direct-signing anchor here if the Windows source changes in the future.
-pub const OPENAI_MARKETPLACE_PUBLISHER_SUBJECT: &str =
-    "cn=50bdfd77-8903-4850-9ffe-6e8522f64d5b";
+pub const OPENAI_MARKETPLACE_PUBLISHER_SUBJECT: &str = "cn=50bdfd77-8903-4850-9ffe-6e8522f64d5b";
+pub const MICROSOFT_WEB_INSTALLER_PUBLISHER_SUBJECT: &str =
+    "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US";
 #[cfg(any(windows, test))]
 const MICROSOFT_MARKETPLACE_ISSUER_CN_PREFIX: &str = "cn=microsoft marketplace ca";
 #[cfg(any(windows, test))]
@@ -31,6 +32,12 @@ pub struct AuthenticodeReport {
 impl AuthenticodeReport {
     pub fn is_valid_openai(&self) -> bool {
         self.trusted && self.publisher_is_openai
+    }
+
+    pub fn is_valid_microsoft_web_installer(&self) -> bool {
+        self.trusted
+            && normalized_dn_components(&self.subject)
+                == normalized_dn_components(MICROSOFT_WEB_INSTALLER_PUBLISHER_SUBJECT)
     }
 }
 
@@ -170,6 +177,37 @@ pub fn verify_openai_authenticode(path: &Path) -> Result<AuthenticodeReport, Eng
     Ok(report)
 }
 
+#[cfg(windows)]
+pub fn verify_microsoft_web_installer_authenticode(
+    path: &Path,
+) -> Result<AuthenticodeReport, EngineError> {
+    log::info!("Microsoft Web Installer Authenticode verification start");
+    let script = authenticode_script(path);
+    let mut command = hidden_command(powershell_exe());
+    command.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+    let output = run_capturing(command, RunLimits::probe(), None).map_err(|error| {
+        EngineError::Authenticode(format!("Get-AuthenticodeSignature: {}", error.message()))
+    })?;
+    if !output.status.success() {
+        return Err(EngineError::Authenticode(format!(
+            "Get-AuthenticodeSignature failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let report = report_from_json(String::from_utf8_lossy(&output.stdout).trim())?;
+    if !report.is_valid_microsoft_web_installer() {
+        return Err(EngineError::Authenticode(format!(
+            "Microsoft Web Installer signer mismatch status={} subject={}",
+            report.status, report.subject
+        )));
+    }
+    log::info!(
+        "Microsoft Web Installer Authenticode verification passed signer={}",
+        report.subject
+    );
+    Ok(report)
+}
+
 #[cfg(not(windows))]
 pub fn verify_openai_authenticode(_path: &Path) -> Result<AuthenticodeReport, EngineError> {
     log::info!("Authenticode verification start");
@@ -183,6 +221,15 @@ pub fn verify_openai_authenticode(_path: &Path) -> Result<AuthenticodeReport, En
         issuer: String::new(),
         thumbprint: String::new(),
     })
+}
+
+#[cfg(not(windows))]
+pub fn verify_microsoft_web_installer_authenticode(
+    _path: &Path,
+) -> Result<AuthenticodeReport, EngineError> {
+    Err(EngineError::Authenticode(
+        "Microsoft Web Installer verification is only available on Windows".to_string(),
+    ))
 }
 
 #[cfg(test)]
@@ -232,6 +279,31 @@ mod tests {
         )
         .unwrap();
         assert!(!report.is_valid_openai());
+    }
+
+    #[test]
+    fn accepts_only_exact_microsoft_web_installer_subject() {
+        let exact = report_from_json(
+            r#"{
+              "status":"Valid",
+              "subject":"CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US",
+              "issuer":"CN=Microsoft Code Signing PCA",
+              "thumbprint":"ABC"
+            }"#,
+        )
+        .unwrap();
+        assert!(exact.is_valid_microsoft_web_installer());
+
+        let lookalike = report_from_json(
+            r#"{
+              "status":"Valid",
+              "subject":"CN=Microsoft Corporation, O=Microsoft Corporation, C=US",
+              "issuer":"CN=Microsoft Code Signing PCA",
+              "thumbprint":"ABC"
+            }"#,
+        )
+        .unwrap();
+        assert!(!lookalike.is_valid_microsoft_web_installer());
     }
 
     #[cfg(windows)]

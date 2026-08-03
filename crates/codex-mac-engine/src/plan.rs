@@ -61,26 +61,23 @@ pub fn plan_update(appcast: &Appcast, current_build: u64) -> Option<UpdatePlan> 
     }
 
     // Prefer a delta published *from* the installed build.
-    let (strategy, url, size, sig) = match latest
-        .deltas
-        .iter()
-        .find(|d| d.from_build == current_build)
-    {
-        Some(d) => (
-            UpdateStrategy::Delta {
-                from_build: d.from_build,
-            },
-            d.url.clone(),
-            d.length,
-            d.ed_signature.clone(),
-        ),
-        None => (
-            UpdateStrategy::Full,
-            latest.full.url.clone(),
-            latest.full.length,
-            latest.full.ed_signature.clone(),
-        ),
-    };
+    let (strategy, url, size, sig) =
+        match latest.deltas.iter().find(|d| d.from_build == current_build) {
+            Some(d) => (
+                UpdateStrategy::Delta {
+                    from_build: d.from_build,
+                },
+                d.url.clone(),
+                d.length,
+                d.ed_signature.clone(),
+            ),
+            None => (
+                UpdateStrategy::Full,
+                latest.full.url.clone(),
+                latest.full.length,
+                latest.full.ed_signature.clone(),
+            ),
+        };
 
     let savings_pct = if full_size > 0 {
         (1.0 - (size as f64 / full_size as f64)) * 100.0

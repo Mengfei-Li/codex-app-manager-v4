@@ -230,9 +230,7 @@ fn run_curl_once(
             let downloaded = std::fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
             return match kind {
                 TimeoutKind::Stall => {
-                    log::warn!(
-                        "Windows download stalled source={source} downloaded={downloaded}"
-                    );
+                    log::warn!("Windows download stalled source={source} downloaded={downloaded}");
                     Err(CurlAttemptError::Other(format!(
                         "curl download stalled (no progress) source={source} downloaded={downloaded}"
                     )))
@@ -624,7 +622,7 @@ mod tests {
             seen.lock().unwrap().push(downloaded);
         });
         if let Err(EngineError::Io(message)) = &result {
-            if message.contains("Protocol \"file\" disabled") {
+            if message.contains("Protocol \"file\"") && message.contains("disabled") {
                 let _ = std::fs::remove_dir_all(&root);
                 return;
             }
