@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::app::atomic_file::{read_with_recovery, write_atomic, LoadOutcome};
 
-pub const OPERATION_JOURNAL_SCHEMA_VERSION: u32 = 1;
+pub const OPERATION_JOURNAL_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -31,6 +31,60 @@ pub struct JournalProgress {
     pub downloaded: u64,
     pub total: u64,
     pub source: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationUiState {
+    pub step_index: u16,
+    pub step_total: u16,
+    pub step_key: String,
+    pub component: String,
+    pub system_action: String,
+    pub attempt_current: u32,
+    pub attempt_total: u32,
+    pub source_label: Option<String>,
+    pub bytes_per_second: Option<u64>,
+    pub eta_seconds: Option<u64>,
+    pub last_activity_unix: u64,
+    pub stall_after_seconds: u64,
+    pub point_of_no_return: bool,
+}
+
+impl OperationUiState {
+    pub fn initial(started_unix: u64) -> Self {
+        Self {
+            step_index: 1,
+            step_total: 6,
+            step_key: "preparing".to_string(),
+            component: "codex-desktop".to_string(),
+            system_action: "preflight".to_string(),
+            attempt_current: 1,
+            attempt_total: 3,
+            source_label: None,
+            bytes_per_second: None,
+            eta_seconds: None,
+            last_activity_unix: started_unix,
+            stall_after_seconds: 30,
+            point_of_no_return: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationDiagnosticState {
+    pub report_id: String,
+    pub local_bundle_path: String,
+    pub upload_status: String,
+    pub support_summary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationPartialOutcome {
+    pub primary: String,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,6 +110,12 @@ pub struct OperationJournal {
     pub pid: u32,
     pub progress: Option<JournalProgress>,
     pub paused: bool,
+    #[serde(default)]
+    pub ui: Option<OperationUiState>,
+    #[serde(default)]
+    pub diagnostics: Option<OperationDiagnosticState>,
+    #[serde(default)]
+    pub partial_outcome: Option<OperationPartialOutcome>,
     pub evidence: JournalEvidence,
     pub last_error: Option<String>,
 }
@@ -124,6 +184,9 @@ mod tests {
                 source: "mirror.example".to_string(),
             }),
             paused: false,
+            ui: Some(OperationUiState::initial(100)),
+            diagnostics: None,
+            partial_outcome: None,
             evidence: JournalEvidence::default(),
             last_error: None,
         }

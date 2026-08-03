@@ -7,7 +7,7 @@ use url::Url;
 pub const MAX_LOG_FILE_BYTES: u128 = 2 * 1024 * 1024;
 pub const KEEP_LOG_FILES: usize = 5;
 
-pub fn logs_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
+pub fn logs_dir<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Option<PathBuf> {
     app.path().app_log_dir().ok()
 }
 

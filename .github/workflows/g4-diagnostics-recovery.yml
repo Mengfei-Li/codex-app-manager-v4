@@ -1,0 +1,114 @@
+name: G4 diagnostics and recovery
+
+# G4 proves the durable operation snapshot, explicit progress contract and
+# local-first failure bundle on every supported native architecture. Server-side
+# receiver tests remain in the Portal deployment tree and are sealed into the
+# gate evidence before G4 is closed.
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/v4-main]
+  pull_request:
+    paths:
+      - "crates/codex-diagnostics-engine/**"
+      - "src-tauri/src/app/operation_journal.rs"
+      - "src-tauri/src/app/oplock.rs"
+      - "src-tauri/src/v4_diagnostics.rs"
+      - "src-tauri/src/commands.rs"
+      - "src-tauri/src/lib.rs"
+      - "src/app/views/DiagnosticReportPanel*"
+      - "src/app/views/ProgressScreen.tsx"
+      - "src/app/views/useOperationSnapshot.ts"
+      - "src/services/managerApi*"
+      - "src/shared/types.ts"
+      - "scripts/g4-write-evidence.mjs"
+      - ".github/workflows/g4-diagnostics-recovery.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: g4-diagnostics-recovery-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend-contract:
+    name: snapshot and support UI
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.16.0
+          cache: npm
+      - run: npm ci
+      - name: Type and lint contracts
+        run: npm run check && npm run lint
+      - name: Renderer reload, progress and diagnostic controls
+        run: npm test -- --run
+
+  native-diagnostics:
+    name: ${{ matrix.name }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            runner: windows-2025
+            target: x86_64-pc-windows-msvc
+          - name: windows-arm64
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+          - name: macos-arm64
+            runner: macos-15
+            target: aarch64-apple-darwin
+          - name: macos-x64
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.16.0
+          cache: npm
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: 1.97.1
+          targets: ${{ matrix.target }}
+          components: clippy
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: |
+            src-tauri -> target
+            crates/codex-diagnostics-engine -> target
+      - run: npm ci
+      - name: Bundle, redaction, child log and offline retransmission
+        run: cargo test --manifest-path crates/codex-diagnostics-engine/Cargo.toml --all-targets -- --test-threads=1
+      - name: Diagnostics engine zero-warning lint
+        run: cargo clippy --manifest-path crates/codex-diagnostics-engine/Cargo.toml --all-targets -- -D warnings
+      - name: Manager operation journal and diagnostic adapter
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib -- --test-threads=1
+      - name: Native target compile
+        run: cargo build --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }}
+      - name: Write immutable G4 evidence summary
+        env:
+          G4_NAME: ${{ matrix.name }}
+          G4_RUNNER: ${{ matrix.runner }}
+          G4_TARGET: ${{ matrix.target }}
+          G4_SHA: ${{ github.sha }}
+          G4_RUN_ID: ${{ github.run_id }}
+        run: node scripts/g4-write-evidence.mjs
+      - name: Upload G4 platform evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g4-diagnostics-${{ matrix.name }}
+          path: artifacts/g4/${{ matrix.name }}.json
+          if-no-files-found: error
+          retention-days: 30

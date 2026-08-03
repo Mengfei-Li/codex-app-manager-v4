@@ -291,22 +291,33 @@ fn begin_guard(state: &ManagerState, kind: OperationKind) -> Result<OperationGua
 }
 
 struct DetachedGuard {
+    app: AppHandle,
     completion_tracking: bool,
+    failure: Option<crate::v4_diagnostics::FailureDescriptor>,
     operations: OperationManager,
     succeeded: bool,
     token: Option<OperationToken>,
 }
 
 impl DetachedGuard {
-    fn validate(state: &ManagerState, token: OperationToken) -> Result<Self, CommandError> {
-        Self::validate_inner(state, token, false)
+    fn validate(
+        app: &AppHandle,
+        state: &ManagerState,
+        token: OperationToken,
+    ) -> Result<Self, CommandError> {
+        Self::validate_inner(app, state, token, true)
     }
 
-    fn validate_tracked(state: &ManagerState, token: OperationToken) -> Result<Self, CommandError> {
-        Self::validate_inner(state, token, true)
+    fn validate_tracked(
+        app: &AppHandle,
+        state: &ManagerState,
+        token: OperationToken,
+    ) -> Result<Self, CommandError> {
+        Self::validate_inner(app, state, token, true)
     }
 
     fn validate_inner(
+        app: &AppHandle,
         state: &ManagerState,
         token: OperationToken,
         completion_tracking: bool,
@@ -316,7 +327,9 @@ impl DetachedGuard {
             .validate(&token)
             .map_err(destructive_token_error)?;
         Ok(Self {
+            app: app.clone(),
             completion_tracking,
+            failure: None,
             operations,
             succeeded: false,
             token: Some(token),
@@ -324,6 +337,7 @@ impl DetachedGuard {
     }
 
     fn validate_with_phase(
+        app: &AppHandle,
         state: &ManagerState,
         token: OperationToken,
         phase: OperationPhase,
@@ -333,7 +347,9 @@ impl DetachedGuard {
             .validate_with_phase(&token, phase)
             .map_err(destructive_token_error)?;
         Ok(Self {
-            completion_tracking: false,
+            app: app.clone(),
+            completion_tracking: true,
+            failure: None,
             operations,
             succeeded: false,
             token: Some(token),
@@ -342,6 +358,30 @@ impl DetachedGuard {
 
     fn mark_succeeded(&mut self) {
         self.succeeded = true;
+    }
+
+    fn mark_failed(&mut self, error: &CommandError) {
+        let stage = self
+            .operations
+            .snapshot()
+            .map(|snapshot| snapshot.phase.as_str().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        self.failure = Some(crate::v4_diagnostics::FailureDescriptor::from_command(
+            error, &stage,
+        ));
+    }
+
+    fn finish<T>(&mut self, result: Result<T, CommandError>) -> Result<T, CommandError> {
+        match result {
+            Ok(value) => {
+                self.mark_succeeded();
+                Ok(value)
+            }
+            Err(error) => {
+                self.mark_failed(&error);
+                Err(error)
+            }
+        }
     }
 
     fn set_phase(&self, phase: OperationPhase) {
@@ -404,6 +444,26 @@ impl Drop for DetachedGuard {
     fn drop(&mut self) {
         if let Some(token) = self.token.take() {
             if self.completion_tracking {
+                if !self.succeeded {
+                    let stage = self
+                        .operations
+                        .snapshot()
+                        .map(|snapshot| snapshot.phase.as_str().to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    let failure = self.failure.take().unwrap_or_else(|| {
+                        crate::v4_diagnostics::FailureDescriptor::generic(&stage)
+                    });
+                    if crate::v4_diagnostics::finalize_failure(
+                        &self.app,
+                        &self.operations,
+                        &token,
+                        failure,
+                    )
+                    .is_none()
+                    {
+                        log::error!("failed to finalize V4 diagnostic bundle");
+                    }
+                }
                 if let Err(error) = self.operations.record_completion(&token, self.succeeded) {
                     log::error!("failed to record terminal operation outcome: {error}");
                 }
@@ -765,7 +825,7 @@ pub async fn mac_perform_update(
             AppError::Internal("拒绝执行：破坏性更新必须带显式 confirm".to_string()).into(),
         );
     }
-    let op = DetachedGuard::validate(&state, token)?;
+    let mut op = DetachedGuard::validate(&app, &state, token)?;
     op.set_phase(OperationPhase::Preparing);
     // Best-effort: a full-package update needs no delta tool, so don't reject the
     // whole operation when it's absent — only the delta branch requires it.
@@ -784,38 +844,42 @@ pub async fn mac_perform_update(
     let phase_token = op.token_clone();
     let progress_token = phase_token.clone();
     let progress_ops = ops.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let report = move |p: crate::app::mac_update::DownloadProgress| {
-            if let Some(token) = progress_token.as_ref() {
-                emit_op_download_progress(
-                    &progress_app,
-                    &progress_ops,
-                    token,
-                    "mac://download-progress",
-                    p.downloaded,
-                    p.total,
-                    p.source,
-                );
-            } else {
-                let _ = progress_app.emit("mac://download-progress", p);
-            }
+    let result: Result<MacPerformReport, CommandError> =
+        match tauri::async_runtime::spawn_blocking(move || {
+            let report = move |p: crate::app::mac_update::DownloadProgress| {
+                if let Some(token) = progress_token.as_ref() {
+                    emit_op_download_progress(
+                        &progress_app,
+                        &progress_ops,
+                        token,
+                        "mac://download-progress",
+                        p.downloaded,
+                        p.total,
+                        p.source,
+                    );
+                } else {
+                    let _ = progress_app.emit("mac://download-progress", p);
+                }
+            };
+            let phase_hook = |phase: OperationPhase| {
+                if let Some(token) = phase_token.as_ref() {
+                    let _ = ops.set_phase(token, phase);
+                }
+            };
+            perform_macos_update_with_network_and_phase(
+                binary_delta,
+                expected,
+                &report,
+                &network,
+                Some(&phase_hook),
+            )
+        })
+        .await
+        {
+            Ok(result) => result.map_err(Into::into),
+            Err(error) => Err(AppError::Internal(format!("join: {error}")).into()),
         };
-        let phase_hook = |phase: OperationPhase| {
-            if let Some(token) = phase_token.as_ref() {
-                let _ = ops.set_phase(token, phase);
-            }
-        };
-        perform_macos_update_with_network_and_phase(
-            binary_delta,
-            expected,
-            &report,
-            &network,
-            Some(&phase_hook),
-        )
-    })
-    .await
-    .map_err(|e| AppError::Internal(format!("join: {e}")))?
-    .map_err(Into::into)
+    op.finish(result)
 }
 
 /// macOS-only: classify the installed Codex (managed / external / none).
@@ -1170,6 +1234,7 @@ pub fn reset_config(
 /// be one-clicked from a recovery CTA.
 #[tauri::command]
 pub fn retry_ancillary(
+    app: AppHandle,
     state: State<'_, ManagerState>,
     request: AncillaryRetryRequest,
     confirm: Option<bool>,
@@ -1186,9 +1251,9 @@ pub fn retry_ancillary(
     #[allow(dead_code)]
     enum RetryGuard {
         Scoped(OperationGuard),
-        Detached(DetachedGuard),
+        Detached(Box<DetachedGuard>),
     }
-    let _guard: RetryGuard = if purge {
+    let mut guard: RetryGuard = if purge {
         if confirm != Some(true) {
             return Err(
                 AppError::Internal("清除用户数据需要二次确认（confirm=true）".to_string()).into(),
@@ -1199,18 +1264,23 @@ pub fn retry_ancillary(
                 "清除用户数据需要破坏性令牌（先 arm_destructive uninstall）".to_string(),
             )
         })?;
-        let guard = DetachedGuard::validate_with_phase(&state, token, OperationPhase::Committing)?;
-        RetryGuard::Detached(guard)
+        let guard =
+            DetachedGuard::validate_with_phase(&app, &state, token, OperationPhase::Committing)?;
+        RetryGuard::Detached(Box::new(guard))
     } else {
         RetryGuard::Scoped(begin_guard(&state, OperationKind::Adopt)?)
     };
-    match state.target.os {
+    let result = match state.target.os {
         OperatingSystem::Macos => retry_macos_ancillary(actions, path, purge).map_err(Into::into),
         OperatingSystem::Windows => {
             let settings = windows_domain_settings_for_persisted(&state);
             retry_windows_ancillary(&settings, actions, path, purge).map_err(Into::into)
         }
         _ => Err(AppError::UnsupportedPlatform.into()),
+    };
+    match &mut guard {
+        RetryGuard::Detached(detached) => detached.finish(result),
+        RetryGuard::Scoped(_) => result,
     }
 }
 
@@ -1472,6 +1542,7 @@ pub async fn win_reset_install_root(
 /// user opts out. Runs the blocking work off the main thread.
 #[tauri::command]
 pub async fn mac_uninstall(
+    app: AppHandle,
     state: State<'_, ManagerState>,
     confirm: bool,
     token: OperationToken,
@@ -1483,14 +1554,17 @@ pub async fn mac_uninstall(
     if !confirm {
         return Err(AppError::Internal("拒绝执行：卸载必须带显式 confirm".to_string()).into());
     }
-    let _op = DetachedGuard::validate_with_phase(&state, token, OperationPhase::Committing)?;
+    let mut op =
+        DetachedGuard::validate_with_phase(&app, &state, token, OperationPhase::Committing)?;
     // Uninstall has no resumable cancellation protocol. Treat the whole worker
     // as point-of-no-return so every native/window quit path blocks until the
     // removal and ancillary bookkeeping have settled.
-    tauri::async_runtime::spawn_blocking(move || uninstall_macos(keep_codex_home))
-        .await
-        .map_err(|e| AppError::Internal(format!("join: {e}")))?
-        .map_err(Into::into)
+    let result: Result<MacUninstallReport, CommandError> =
+        match tauri::async_runtime::spawn_blocking(move || uninstall_macos(keep_codex_home)).await {
+            Ok(result) => result.map_err(Into::into),
+            Err(error) => Err(AppError::Internal(format!("join: {error}")).into()),
+        };
+    op.finish(result)
 }
 
 /// Windows-only: background pre-download guard. It stages only when the user
@@ -1618,6 +1692,29 @@ pub fn open_url(url: String) -> Result<(), CommandError> {
 pub fn get_diagnostics(app: tauri::AppHandle, state: State<'_, ManagerState>) -> Diagnostics {
     log::info!("collecting diagnostics");
     crate::app::diagnostics::collect_diagnostics(&app, &state)
+}
+
+#[tauri::command]
+pub fn get_latest_diagnostic_report() -> Option<crate::v4_diagnostics::LatestDiagnosticReport> {
+    crate::v4_diagnostics::latest_report()
+}
+
+#[tauri::command]
+pub async fn retry_latest_diagnostic_upload(
+) -> Result<crate::v4_diagnostics::LatestDiagnosticReport, CommandError> {
+    tauri::async_runtime::spawn_blocking(crate::v4_diagnostics::retry_latest_upload)
+        .await
+        .map_err(|error| AppError::Internal(format!("join: {error}")))?
+        .map_err(|code| AppError::Internal(code).into())
+}
+
+#[tauri::command]
+pub async fn delete_latest_diagnostic_bundle(
+) -> Result<crate::v4_diagnostics::LatestDiagnosticReport, CommandError> {
+    tauri::async_runtime::spawn_blocking(crate::v4_diagnostics::delete_latest_bundle)
+        .await
+        .map_err(|error| AppError::Internal(format!("join: {error}")))?
+        .map_err(|code| AppError::Internal(code).into())
 }
 
 #[tauri::command]
@@ -1872,7 +1969,7 @@ pub async fn win_perform_update(
             AppError::Internal("拒绝执行：Windows 更新必须带显式 confirm".to_string()).into(),
         );
     }
-    let mut op = DetachedGuard::validate_tracked(&state, token)?;
+    let mut op = DetachedGuard::validate_tracked(&app, &state, token)?;
     op.set_phase(OperationPhase::Preparing);
     let endpoints = windows_endpoints_for_settings(&state)?;
     let mut settings = windows_domain_settings_for_persisted(&state);
@@ -1969,6 +2066,7 @@ pub async fn win_perform_update(
 /// by this app. User data is preserved unless `purge_user_data` is true.
 #[tauri::command]
 pub async fn win_uninstall(
+    app: AppHandle,
     state: State<'_, ManagerState>,
     confirm: bool,
     token: OperationToken,
@@ -1982,15 +2080,20 @@ pub async fn win_uninstall(
             AppError::Internal("拒绝执行：Windows 卸载必须带显式 confirm".to_string()).into(),
         );
     }
-    let _op = DetachedGuard::validate_with_phase(&state, token, OperationPhase::Committing)?;
+    let mut op =
+        DetachedGuard::validate_with_phase(&app, &state, token, OperationPhase::Committing)?;
     // Remove-AppxPackage / portable tree removal must not be killed mid-call.
     let settings = windows_domain_settings_for_persisted(&state);
-    tauri::async_runtime::spawn_blocking(move || {
-        uninstall_windows_codex(&settings, confirm, purge_user_data)
-    })
-    .await
-    .map_err(|e| AppError::Internal(format!("join: {e}")))?
-    .map_err(Into::into)
+    let result: Result<WinUninstallReport, CommandError> =
+        match tauri::async_runtime::spawn_blocking(move || {
+            uninstall_windows_codex(&settings, confirm, purge_user_data)
+        })
+        .await
+        {
+            Ok(result) => result.map_err(Into::into),
+            Err(error) => Err(AppError::Internal(format!("join: {error}")).into()),
+        };
+    op.finish(result)
 }
 
 #[cfg(test)]

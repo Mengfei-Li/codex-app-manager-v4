@@ -10,7 +10,8 @@ use fs4::{FileExt as Fs4FileExt, TryLockError};
 
 use crate::app::op_phase::{OperationPhase, QuitPolicy};
 use crate::app::operation_journal::{
-    JournalEvidence, JournalProgress, JournalStatus, OperationJournal, OperationJournalStore,
+    JournalEvidence, JournalProgress, JournalStatus, OperationDiagnosticState, OperationJournal,
+    OperationJournalStore, OperationPartialOutcome, OperationUiState,
     OPERATION_JOURNAL_SCHEMA_VERSION,
 };
 
@@ -95,6 +96,18 @@ pub struct OperationSnapshot {
     pub cancellable: bool,
     /// Whether the phase may be interrupted (pause/cancel/quit-after-cancel).
     pub interruptible: bool,
+    pub ui: OperationUiSnapshot,
+    pub diagnostics: Option<OperationDiagnosticState>,
+    pub partial_outcome: Option<OperationPartialOutcome>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationUiSnapshot {
+    #[serde(flatten)]
+    pub state: OperationUiState,
+    pub stall_elapsed_seconds: u64,
+    pub stalled: bool,
 }
 
 /// Terminal backend evidence retained across renderer reloads. The frontend
@@ -150,6 +163,9 @@ struct ActiveOp {
     paused: bool,
     attempt: u32,
     last_error: Option<String>,
+    ui: OperationUiState,
+    diagnostics: Option<OperationDiagnosticState>,
+    partial_outcome: Option<OperationPartialOutcome>,
 }
 
 #[must_use = "持有 guard 才代表持有操作锁；提前 drop 会立即释放锁"]
@@ -377,6 +393,11 @@ impl OperationManager {
         inner.active.as_ref().map(|active| active.kind)
     }
 
+    pub fn journal_path(&self) -> Option<PathBuf> {
+        let inner = self.inner.lock().ok()?;
+        Some(inner.journal.path().to_path_buf())
+    }
+
     /// Advance the phase for a validated token. No-op-safe if the token is gone.
     pub fn set_phase(
         &self,
@@ -402,6 +423,7 @@ impl OperationManager {
                 token_prefix(&token.0)
             );
             active.phase = phase;
+            apply_phase_to_ui(&mut active.ui, phase);
         }
         Self::persist_active(&mut inner);
         Ok(())
@@ -618,6 +640,9 @@ impl OperationManager {
                 paused: active.paused,
                 cancellable,
                 interruptible,
+                ui: operation_ui_snapshot(&active.ui),
+                diagnostics: active.diagnostics.clone(),
+                partial_outcome: active.partial_outcome.clone(),
             }
         })
     }
@@ -746,8 +771,124 @@ impl OperationManager {
             return Err(OperationError::InvalidToken);
         }
         // Bytes flowing again means we're no longer in a paused UI state.
+        let now = now_unix();
+        if let Some(previous) = active.progress.as_ref() {
+            if progress.downloaded > previous.downloaded && now > active.ui.last_activity_unix {
+                let elapsed = now - active.ui.last_activity_unix;
+                let delta = progress.downloaded - previous.downloaded;
+                let rate = delta / elapsed.max(1);
+                active.ui.bytes_per_second = (rate > 0).then_some(rate);
+            }
+        }
+        if progress.downloaded
+            > active
+                .progress
+                .as_ref()
+                .map(|previous| previous.downloaded)
+                .unwrap_or(0)
+        {
+            active.ui.last_activity_unix = now;
+        }
+        active.ui.source_label = Some(friendly_source_label(&progress.source));
+        active.ui.eta_seconds = active.ui.bytes_per_second.and_then(|rate| {
+            (progress.total > progress.downloaded && rate > 0)
+                .then_some((progress.total - progress.downloaded).div_ceil(rate))
+        });
         active.paused = false;
         active.progress = Some(progress);
+        Self::persist_active(&mut inner);
+        Ok(())
+    }
+
+    pub fn set_ui_step(
+        &self,
+        token: &OperationToken,
+        step_index: u16,
+        step_total: u16,
+        step_key: impl Into<String>,
+        component: impl Into<String>,
+        system_action: impl Into<String>,
+    ) -> Result<(), OperationError> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| OperationError::Lock("operation mutex poisoned".to_string()))?;
+        let Some(active) = inner.active.as_mut() else {
+            return Err(OperationError::InvalidToken);
+        };
+        if active.token != token.0 || step_total == 0 || step_index == 0 || step_index > step_total
+        {
+            return Err(OperationError::InvalidToken);
+        }
+        active.ui.step_index = step_index;
+        active.ui.step_total = step_total;
+        active.ui.step_key = bounded_ui_text(step_key.into());
+        active.ui.component = bounded_ui_text(component.into());
+        active.ui.system_action = bounded_ui_text(system_action.into());
+        active.ui.last_activity_unix = now_unix();
+        Self::persist_active(&mut inner);
+        Ok(())
+    }
+
+    pub fn set_attempt(
+        &self,
+        token: &OperationToken,
+        current: u32,
+        total: u32,
+    ) -> Result<(), OperationError> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| OperationError::Lock("operation mutex poisoned".to_string()))?;
+        let Some(active) = inner.active.as_mut() else {
+            return Err(OperationError::InvalidToken);
+        };
+        if active.token != token.0 || current == 0 || total == 0 || current > total || total > 10 {
+            return Err(OperationError::InvalidToken);
+        }
+        active.ui.attempt_current = current;
+        active.ui.attempt_total = total;
+        active.ui.last_activity_unix = now_unix();
+        Self::persist_active(&mut inner);
+        Ok(())
+    }
+
+    pub fn set_diagnostic_state(
+        &self,
+        token: &OperationToken,
+        diagnostics: OperationDiagnosticState,
+    ) -> Result<(), OperationError> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| OperationError::Lock("operation mutex poisoned".to_string()))?;
+        let Some(active) = inner.active.as_mut() else {
+            return Err(OperationError::InvalidToken);
+        };
+        if active.token != token.0 {
+            return Err(OperationError::InvalidToken);
+        }
+        active.diagnostics = Some(diagnostics);
+        Self::persist_active(&mut inner);
+        Ok(())
+    }
+
+    pub fn set_partial_outcome(
+        &self,
+        token: &OperationToken,
+        outcome: OperationPartialOutcome,
+    ) -> Result<(), OperationError> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| OperationError::Lock("operation mutex poisoned".to_string()))?;
+        let Some(active) = inner.active.as_mut() else {
+            return Err(OperationError::InvalidToken);
+        };
+        if active.token != token.0 {
+            return Err(OperationError::InvalidToken);
+        }
+        active.partial_outcome = Some(outcome);
         Self::persist_active(&mut inner);
         Ok(())
     }
@@ -824,6 +965,9 @@ impl OperationManager {
             paused: false,
             attempt,
             last_error: None,
+            ui: OperationUiState::initial(started_unix),
+            diagnostics: None,
+            partial_outcome: None,
         });
         Self::persist_active(&mut inner);
         log::info!(
@@ -948,6 +1092,9 @@ struct ActiveJournalSnapshot {
     paused: bool,
     attempt: u32,
     last_error: Option<String>,
+    ui: OperationUiState,
+    diagnostics: Option<OperationDiagnosticState>,
+    partial_outcome: Option<OperationPartialOutcome>,
 }
 
 impl From<&ActiveOp> for ActiveJournalSnapshot {
@@ -964,6 +1111,9 @@ impl From<&ActiveOp> for ActiveJournalSnapshot {
             paused: active.paused,
             attempt: active.attempt,
             last_error: active.last_error.clone(),
+            ui: active.ui.clone(),
+            diagnostics: active.diagnostics.clone(),
+            partial_outcome: active.partial_outcome.clone(),
         }
     }
 }
@@ -992,6 +1142,9 @@ impl ActiveJournalSnapshot {
                 source: progress.source,
             }),
             paused: self.paused,
+            ui: Some(self.ui),
+            diagnostics: self.diagnostics,
+            partial_outcome: self.partial_outcome,
             evidence: JournalEvidence {
                 mutation_started: self.mutation_started,
                 mutation_rolled_back: self.mutation_rolled_back,
@@ -1034,6 +1187,52 @@ fn generate_token(started_unix: u64) -> String {
         nanos ^ started_unix as u128,
         counter
     )
+}
+
+fn apply_phase_to_ui(ui: &mut OperationUiState, phase: OperationPhase) {
+    let (index, key, action) = match phase {
+        OperationPhase::Idle | OperationPhase::Preparing => (1, "preparing", "preflight"),
+        OperationPhase::Downloading => (2, "downloading", "download-payload"),
+        OperationPhase::Verifying => (3, "verifying", "verify-signature-and-hash"),
+        OperationPhase::Applying => (4, "applying", "apply-platform-package"),
+        OperationPhase::Committing => (5, "committing", "commit-installation"),
+        OperationPhase::Finishing => (6, "finishing", "verify-and-clean-up"),
+    };
+    ui.step_index = index;
+    ui.step_total = 6;
+    ui.step_key = key.to_string();
+    ui.system_action = action.to_string();
+    ui.point_of_no_return = !phase.interruptible();
+    ui.last_activity_unix = now_unix();
+}
+
+fn operation_ui_snapshot(state: &OperationUiState) -> OperationUiSnapshot {
+    let stall_elapsed_seconds = now_unix().saturating_sub(state.last_activity_unix);
+    OperationUiSnapshot {
+        state: state.clone(),
+        stall_elapsed_seconds,
+        stalled: state.stall_after_seconds > 0
+            && stall_elapsed_seconds >= state.stall_after_seconds,
+    }
+}
+
+fn friendly_source_label(source: &str) -> String {
+    let lower = source.to_ascii_lowercase();
+    if lower.contains("agentsmirror") || lower.contains("2466335") {
+        "V4 Mirror".to_string()
+    } else if lower.contains("openai") || lower.contains("oaistatic") {
+        "OpenAI official".to_string()
+    } else {
+        bounded_ui_text(source.to_string())
+    }
+}
+
+fn bounded_ui_text(value: String) -> String {
+    value
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(160)
+        .collect()
 }
 
 fn now_unix() -> u64 {

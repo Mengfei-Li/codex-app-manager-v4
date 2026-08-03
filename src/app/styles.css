@@ -1795,6 +1795,91 @@ button.row.danger:hover {
   letter-spacing: 0.01em;
   font-variant-numeric: tabular-nums;
 }
+.progress-detail-grid {
+  width: min(100%, 360px);
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: var(--space-md);
+  text-align: start;
+}
+.progress-detail-grid > div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--surface-1);
+}
+.progress-detail-grid span {
+  color: var(--text-soft);
+  font-size: var(--fs-xs);
+}
+.progress-detail-grid strong {
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+}
+.progress-detail-grid .progress-stalled {
+  border-color: color-mix(in oklch, var(--warn) 45%, var(--line));
+  background: color-mix(in oklch, var(--warn) 8%, var(--surface-1));
+}
+.progress-partial,
+.progress-report {
+  width: min(100%, 360px);
+  display: grid;
+  gap: 5px;
+  margin-top: var(--space-sm);
+  padding: 10px 12px;
+  text-align: start;
+  border-radius: var(--r-sm);
+  border: 1px solid color-mix(in oklch, var(--warn) 35%, var(--line));
+  background: color-mix(in oklch, var(--warn) 7%, var(--surface-1));
+  font-size: var(--fs-xs);
+}
+.progress-report {
+  border-color: color-mix(in oklch, var(--accent) 30%, var(--line));
+  background: color-mix(in oklch, var(--accent) 6%, var(--surface-1));
+}
+.progress-report code {
+  overflow-wrap: anywhere;
+  color: var(--text-soft);
+  font-size: 10px;
+}
+
+.diagnostic-report-panel {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface-2);
+  overflow-wrap: anywhere;
+}
+
+.diagnostic-report-panel code {
+  display: block;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--surface);
+  font-size: 11px;
+  user-select: text;
+}
+
+.diagnostic-report-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.diagnostic-report-message {
+  color: var(--text-soft);
+  font-size: 12px;
+}
 .progress-actions {
   width: min(100%, 320px);
   display: grid;

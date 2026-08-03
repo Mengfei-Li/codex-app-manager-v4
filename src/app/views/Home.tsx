@@ -35,6 +35,8 @@ import { ProgressScreen, type PausedDownload } from "./ProgressScreen";
 import { useDownloadProgress } from "./useDownloadProgress";
 import { useFocusRecheck, installIdentity } from "./useFocusRecheck";
 import { useOperationReattach } from "./useOperationReattach";
+import { useOperationSnapshot } from "./useOperationSnapshot";
+import { DiagnosticReportPanel } from "./DiagnosticReportPanel";
 
 type Kind = "loading" | "error" | "none" | "idle" | "update" | "external" | "uptodate";
 
@@ -110,6 +112,9 @@ function MacHome({ onOpenSettings }: { onOpenSettings: () => void }) {
     getOperationSnapshot: () => managerApi.getOperationSnapshot(),
     onError: setActionError,
   });
+  const operationSnapshot = useOperationSnapshot(
+    busy === "perform" || busy === "install" || paused !== null,
+  );
 
   const refreshStatus = useCallback(async () => {
     try {
@@ -560,6 +565,7 @@ function MacHome({ onOpenSettings }: { onOpenSettings: () => void }) {
         dlPct={dlPct}
         dlBytes={dlBytes}
         dlSpeed={dlSpeed}
+        operation={operationSnapshot}
         installing={paused ? paused.kind === "install" : busy === "install"}
         downloadStop={downloadStop}
         downloadStopBusy={downloadStopBusy || pausedDiscardBusy}
@@ -584,6 +590,7 @@ function MacHome({ onOpenSettings }: { onOpenSettings: () => void }) {
         <TopBar />
         <div className="scroll" ref={scopeRef}>
           {actionError ? <FailureBanner failure={actionError} /> : null}
+          <DiagnosticReportPanel active={Boolean(actionError)} />
           {notice || needsRecord ? (
             <StatusBanner tone="warn">
               {notice ?? t("install.partial.note", { action: t("install.partial.record") })}
@@ -667,6 +674,7 @@ function MacHome({ onOpenSettings }: { onOpenSettings: () => void }) {
           />
         ) : null}
         {actionError ? <FailureBanner failure={actionError} /> : null}
+        <DiagnosticReportPanel active={Boolean(actionError)} />
 
         <section className="hero" key={scene}>
           {rechecking ? (

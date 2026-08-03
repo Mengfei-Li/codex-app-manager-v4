@@ -10,6 +10,7 @@ import type {
   ConfigHealth,
   ConfigWhich,
   Diagnostics,
+  LatestDiagnosticReport,
   MacInstallStatus,
   MacPerformReport,
   MacUninstallReport,
@@ -516,6 +517,25 @@ export const managerApi = {
       return Promise.resolve(null);
     }
     return invoke<OperationCompletion | null>("get_operation_completion", { token });
+  },
+  /** Last finalized V4 failure bundle, including durable local/upload state. */
+  getLatestDiagnosticReport(): Promise<LatestDiagnosticReport | null> {
+    if (!hasTauriRuntime()) {
+      return Promise.resolve(null);
+    }
+    return invoke<LatestDiagnosticReport | null>("get_latest_diagnostic_report");
+  },
+  retryLatestDiagnosticUpload(): Promise<LatestDiagnosticReport> {
+    if (!hasTauriRuntime()) {
+      return Promise.reject(new Error("diagnostic upload is available only in the desktop app"));
+    }
+    return invoke<LatestDiagnosticReport>("retry_latest_diagnostic_upload");
+  },
+  deleteLatestDiagnosticBundle(): Promise<LatestDiagnosticReport> {
+    if (!hasTauriRuntime()) {
+      return Promise.reject(new Error("diagnostic bundles are available only in the desktop app"));
+    }
+    return invoke<LatestDiagnosticReport>("delete_latest_diagnostic_bundle");
   },
   macPlanUpdate(simulatedBuild?: number): Promise<MacUpdateReport> {
     if (!hasTauriRuntime()) {

@@ -6,6 +6,7 @@ pub mod domain;
 pub mod errors;
 
 mod state;
+mod v4_diagnostics;
 
 use std::sync::atomic::Ordering;
 
@@ -785,6 +786,9 @@ pub fn run() {
             commands::win_perform_update,
             commands::win_uninstall,
             commands::get_diagnostics,
+            commands::get_latest_diagnostic_report,
+            commands::retry_latest_diagnostic_upload,
+            commands::delete_latest_diagnostic_bundle,
             commands::open_logs_dir,
             commands::open_codex_home,
             commands::log_frontend_error,

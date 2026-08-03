@@ -207,4 +207,36 @@ describe("diagnostics API", () => {
       },
     });
   });
+
+  it("reads, retries, and deletes the durable V4 diagnostic report", async () => {
+    window.__TAURI_INTERNALS__ = {};
+    const report = {
+      schemaVersion: 1,
+      reportId: "IR-20260803-ABCDEF01",
+      operationId: "op-1",
+      localBundlePath: "C:/diagnostics/report.zip",
+      bundleSha256: "a".repeat(64),
+      uploadStatus: "pending",
+      uploadAttempts: 0,
+      serverReceiptId: null,
+      supportSummary: "download failed",
+      updatedAtUnix: 1,
+    };
+    invokeMock
+      .mockResolvedValueOnce(report)
+      .mockResolvedValueOnce({ ...report, uploadStatus: "uploaded" })
+      .mockResolvedValueOnce({ ...report, localBundlePath: "", uploadStatus: "deleted" });
+
+    await expect(managerApi.getLatestDiagnosticReport()).resolves.toEqual(report);
+    await expect(managerApi.retryLatestDiagnosticUpload()).resolves.toMatchObject({
+      uploadStatus: "uploaded",
+    });
+    await expect(managerApi.deleteLatestDiagnosticBundle()).resolves.toMatchObject({
+      uploadStatus: "deleted",
+    });
+
+    expect(invokeMock).toHaveBeenNthCalledWith(1, "get_latest_diagnostic_report");
+    expect(invokeMock).toHaveBeenNthCalledWith(2, "retry_latest_diagnostic_upload");
+    expect(invokeMock).toHaveBeenNthCalledWith(3, "delete_latest_diagnostic_bundle");
+  });
 });

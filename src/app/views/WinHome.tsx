@@ -34,6 +34,8 @@ import { ProgressScreen, type PausedDownload } from "./ProgressScreen";
 import { useDownloadProgress } from "./useDownloadProgress";
 import { useFocusRecheck, installIdentity } from "./useFocusRecheck";
 import { useOperationReattach } from "./useOperationReattach";
+import { useOperationSnapshot } from "./useOperationSnapshot";
+import { DiagnosticReportPanel } from "./DiagnosticReportPanel";
 
 type Kind = "loading" | "error" | "none" | "idle" | "update" | "external" | "uptodate";
 type Busy = "plan" | "perform" | "adopt" | "install" | "launch" | null;
@@ -175,6 +177,9 @@ export function WinHome({ onOpenSettings }: { onOpenSettings: () => void }) {
     getOperationSnapshot: () => managerApi.getOperationSnapshot(),
     onError: setActionError,
   });
+  const operationSnapshot = useOperationSnapshot(
+    busy === "perform" || busy === "install" || paused !== null,
+  );
 
   const runCheck = useCallback(async (generation: number) => {
     if (!ownsOperation(generation)) return false;
@@ -934,6 +939,7 @@ export function WinHome({ onOpenSettings }: { onOpenSettings: () => void }) {
         dlPct={dlPct}
         dlBytes={dlBytes}
         dlSpeed={dlSpeed}
+        operation={operationSnapshot}
         installing={paused ? paused.kind === "install" : busy === "install"}
         downloadStop={downloadStop}
         downloadStopBusy={downloadStopBusy || pausedDiscardBusy}
@@ -1008,6 +1014,7 @@ export function WinHome({ onOpenSettings }: { onOpenSettings: () => void }) {
         ) : null}
         {notice ? <StatusBanner tone="info">{notice}</StatusBanner> : null}
         {actionError ? <FailureBanner failure={actionError} /> : null}
+        <DiagnosticReportPanel active={Boolean(actionError)} />
 
         <section className="hero" key={scene}>
           {rechecking ? (

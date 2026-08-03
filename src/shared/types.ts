@@ -24,6 +24,53 @@ export interface OperationSnapshot {
   paused: boolean;
   cancellable: boolean;
   interruptible: boolean;
+  ui?: OperationUiSnapshot;
+  diagnostics?: OperationDiagnosticState | null;
+  partialOutcome?: OperationPartialOutcome | null;
+}
+
+export interface OperationUiSnapshot {
+  stepIndex: number;
+  stepTotal: number;
+  stepKey: string;
+  component: string;
+  systemAction: string;
+  attemptCurrent: number;
+  attemptTotal: number;
+  sourceLabel: string | null;
+  bytesPerSecond: number | null;
+  etaSeconds: number | null;
+  lastActivityUnix: number;
+  stallAfterSeconds: number;
+  pointOfNoReturn: boolean;
+  stallElapsedSeconds: number;
+  stalled: boolean;
+}
+
+export interface OperationDiagnosticState {
+  reportId: string;
+  localBundlePath: string;
+  uploadStatus: string;
+  supportSummary: string;
+}
+
+/** Durable failure report retained after the operation lease has ended. */
+export interface LatestDiagnosticReport {
+  schemaVersion: number;
+  reportId: string;
+  operationId: string;
+  localBundlePath: string;
+  bundleSha256: string;
+  uploadStatus: string;
+  uploadAttempts: number;
+  serverReceiptId: string | null;
+  supportSummary: string;
+  updatedAtUnix: number;
+}
+
+export interface OperationPartialOutcome {
+  primary: string;
+  warnings: string[];
 }
 
 export type OperationCompletionState =
