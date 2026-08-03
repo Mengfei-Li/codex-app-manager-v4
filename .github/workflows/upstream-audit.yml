@@ -1,0 +1,63 @@
+name: Upstream audit
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_sha:
+        description: Full upstream commit SHA to audit
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+      - name: Fetch exact upstream commit
+        env:
+          NEW_SHA: ${{ inputs.upstream_sha }}
+        run: |
+          test "${#NEW_SHA}" -eq 40
+          git remote add audit-upstream https://github.com/Wangnov/Codex-App-Manager.git
+          git fetch --no-tags audit-upstream "$NEW_SHA"
+          test "$(git rev-parse FETCH_HEAD)" = "$NEW_SHA"
+      - name: Produce review-only audit
+        env:
+          NEW_SHA: ${{ inputs.upstream_sha }}
+        run: |
+          {
+            echo "base=$(git rev-parse HEAD)"
+            echo "candidate=$NEW_SHA"
+            echo "candidate_tree=$(git show -s --format=%T "$NEW_SHA")"
+            echo
+            echo "COMMITS"
+            git log --oneline --decorate HEAD.."$NEW_SHA"
+            echo
+            echo "STAT"
+            git diff --stat HEAD.."$NEW_SHA"
+            echo
+            echo "WORKFLOWS PERMISSIONS DEPENDENCIES LICENSES"
+            git diff HEAD.."$NEW_SHA" -- .github package.json package-lock.json src-tauri/Cargo.toml src-tauri/Cargo.lock LICENSE
+            echo
+            echo "NETWORK ORIGINS"
+            git grep -nE 'https?://' "$NEW_SHA" -- . ':!package-lock.json' || true
+          } > upstream-audit.txt
+      - name: Block removed trust boundaries
+        env:
+          NEW_SHA: ${{ inputs.upstream_sha }}
+        run: |
+          if git grep -nEi 'codex-theme|codex_theme|codexTheme|\.codexskin|skins\.agentsmirror|remote-debugging-port|@gsap/react|(^|/)gsap' "$NEW_SHA" -- .; then
+            echo "Candidate restores a removed V4 trust boundary" >&2
+            exit 1
+          fi
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: upstream-audit
+          path: upstream-audit.txt
+          if-no-files-found: error

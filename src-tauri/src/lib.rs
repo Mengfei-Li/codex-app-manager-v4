@@ -769,23 +769,6 @@ pub fn run() {
             commands::get_autostart,
             commands::set_autostart,
             commands::set_window_mode,
-            commands::codex_theme_list,
-            commands::codex_theme_status,
-            commands::codex_theme_try_on,
-            commands::codex_theme_try_on_restart,
-            commands::codex_theme_keep,
-            commands::codex_theme_delete,
-            commands::codex_theme_apply,
-            commands::codex_theme_off,
-            commands::codex_theme_cancel,
-            commands::codex_theme_import,
-            commands::codex_theme_import_path,
-            commands::codex_theme_preview,
-            commands::codex_theme_catalog,
-            commands::codex_theme_catalog_preview,
-            commands::codex_theme_install_online,
-            commands::codex_theme_pick_store_dir,
-            commands::codex_theme_open_store,
             commands::open_url,
             commands::win_plan_update,
             commands::win_stage_update,
@@ -851,10 +834,6 @@ pub fn run() {
                 // Crash-safe install recovery MUST run before ordinary staging
                 // cleanup so recovery materials (backup / staged new) are not
                 // deleted out from under an incomplete swap.
-                // Native theme transactions recover on the same schedule —
-                // a crash mid config.toml mutation (or an unkept try-on left
-                // hot-imported) must resolve before theme ops reopen.
-                crate::app::codex_theme::recover_native_theme_on_startup();
                 let recovery =
                     crate::app::install_tx::recover_pending_transactions(Some(&operations));
                 if recovery.failed > 0 || recovery.kept_manual > 0 {

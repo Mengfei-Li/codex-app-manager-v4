@@ -73,7 +73,6 @@ function renderSettings() {
           onOpenAbout={vi.fn()}
           onOpenUninstall={vi.fn()}
           onOpenConfig={vi.fn()}
-          onOpenThemes={vi.fn()}
         />
       </I18nProvider>
     </ThemeProvider>,

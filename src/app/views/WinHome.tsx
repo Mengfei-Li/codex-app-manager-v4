@@ -20,11 +20,10 @@ import {
   type FailureSurface,
 } from "../errorCopy";
 import { Icon, CodexGlyph } from "../icons";
-import { useI18n, dirOf, type TKey } from "../i18n";
+import { useI18n, type TKey } from "../i18n";
 import { Ring, TopBar, ResultBanner, ErrorHero, FailureBanner, StatusBanner } from "../components";
 import { mib, fmtDateTime } from "../format";
 import { samePath, normalizePath } from "../paths";
-import { useHomeMotion } from "../motion";
 import { Sheet } from "../Sheet";
 import { skippedUpdateMatches, winSkippedUpdateCandidate } from "../skippedUpdate";
 import {
@@ -896,12 +895,9 @@ export function WinHome({ onOpenSettings }: { onOpenSettings: () => void }) {
     </button>
   );
 
-  // Scene id; on change the hero remounts and GSAP replays the entrance. `lang`
-  // is part of the key so a language switch re-splits the headline (otherwise
-  // SplitText's aria-label keeps the old language's text for screen readers).
+  // Scene id. `lang` remains part of the key so a language switch refreshes the
+  // headline while the view stays mounted.
   const progressing = busy === "perform" || busy === "install";
-  // The paused screen is calm (no shimmer): a settled "已暂停", not in-flight.
-  const isShimmer = progressing || rechecking || kind === "loading";
   const scene = `${lang}/${
     paused
       ? `paused-${paused.kind}`
@@ -909,7 +905,6 @@ export function WinHome({ onOpenSettings }: { onOpenSettings: () => void }) {
         ? `progress-${busy}`
         : `${kind}${rechecking ? "-checking" : ""}`
   }`;
-  const success = !rechecking && kind === "uptodate";
   // A Windows install/update is "clean" only when it actually changed something
   // without a detour — not a stale-plan no-op (stage.upToDate) and not an
   // MSIX→portable fallback. Non-clean successes stay pinned; only clean ones
@@ -929,10 +924,6 @@ export function WinHome({ onOpenSettings }: { onOpenSettings: () => void }) {
     perform && winPartial
       ? [perform.message, ...perform.notes].filter(Boolean).join("\n") || undefined
       : undefined;
-  // Char-split only LTR scripts — splitting cursive RTL (Arabic) breaks joining.
-  const splitHeadline = !isShimmer && dirOf(lang) === "ltr";
-  useHomeMotion(scopeRef, scene, { splitHeadline, success });
-
   if (progressing || paused) {
     return (
       <ProgressScreen

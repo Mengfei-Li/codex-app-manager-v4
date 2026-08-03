@@ -198,13 +198,6 @@ export interface SkippedCodexUpdate {
   skippedAt: number;
 }
 
-/** A user-defined grouping of local skins. */
-export interface SkinGroup {
-  id: string;
-  name: string;
-  skinIds: string[];
-}
-
 export interface AppSettings {
   source: UpdateSourceKind;
   customUrl: string;
@@ -233,14 +226,6 @@ export interface AppSettings {
   disableCodexSelfUpdates: boolean;
   /** One exact Codex app update the user chose not to be reminded about. */
   skippedCodexUpdate: SkippedCodexUpdate | null;
-  /** Persistent Codex UI theme selection (theme id); null = stock. */
-  codexTheme: string | null;
-  /** Extra local directory scanned for theme packages (dev workflow). */
-  codexThemeDir: string | null;
-  /** Managed skin store; null = platform default. */
-  codexThemeStoreDir: string | null;
-  /** User-defined local skin groups, in display order. */
-  skinGroups: SkinGroup[];
 }
 
 export interface ConfigHealth {
@@ -286,10 +271,6 @@ export const DEFAULT_SETTINGS: AppSettings = {
   customProxyUrl: "",
   disableCodexSelfUpdates: false,
   skippedCodexUpdate: null,
-  codexTheme: null,
-  codexThemeDir: null,
-  codexThemeStoreDir: null,
-  skinGroups: [],
 };
 
 export interface MacUninstallReport {
@@ -567,94 +548,6 @@ export function outcomeIsPartial(outcome: OperationOutcome | null | undefined): 
 export interface WinInstallStatus {
   installed: InstalledWindowsCodex | null;
   status: InstallClass;
-}
-
-/** Delivery metadata (optional schemaVersion-2 fields; packer enforces). */
-export interface CodexThemeMeta {
-  version: string | null;
-  author: string | null;
-  /** Codex version the theme was verified against at build time. */
-  codexVerified: string | null;
-  appearance: "dark" | "light" | "dual" | null;
-  tags: string[];
-  license: string | null;
-  /** Package-relative preview images; first is the cover. */
-  previews: string[];
-}
-
-/** A locally installed Codex UI theme package (codex-theme-engine). */
-export interface CodexThemeSummary {
-  id: string;
-  name: string;
-  description: string;
-  dir: string;
-  hasNativeTheme: boolean;
-  /** Color tokens from theme.json — swatch/fallback card art. */
-  colors: Record<string, string>;
-  /** Absolute path of the cover preview when the package ships one. */
-  preview: string | null;
-  meta: CodexThemeMeta;
-  /** Which root produced this entry. The list may carry the same id twice
-   *  (dev checkout shadowing the store copy); dev entries come first. */
-  origin: "dev" | "store";
-}
-
-export interface CodexThemeDaemonStatus {
-  running: boolean;
-  port: number;
-  themeId: string | null;
-  stamp: string | null;
-  connectedTargets: number;
-  lastError: string | null;
-}
-
-export interface CodexThemeStatusReport {
-  /** Whether this platform can theme Codex (macOS and Windows). */
-  supported: boolean;
-  /** The persisted selection — what manager-launches will apply. */
-  activeTheme: string | null;
-  daemon: CodexThemeDaemonStatus | null;
-  /** A CDP endpoint answers on the theme port right now. */
-  cdpReady: boolean;
-  codexRunning: boolean;
-  /** A pristine config.toml appearance backup exists (full restore possible). */
-  nativeBackupPresent: boolean;
-  /** Where managed skins currently live (downloads/imports land here). */
-  storeDir: string | null;
-  /** A pre-try-on native settings stash exists (the try-on is undoable). */
-  tryOnStash: boolean;
-  /** An unresolved native transaction blocks native theme operations. */
-  recoveryRequired: boolean;
-}
-
-/** Result of relocating the skin store. */
-export interface StoreMigrationReport {
-  from: string;
-  to: string;
-  moved: string[];
-  /** Ids left untouched because the destination already had them. */
-  skipped: string[];
-}
-
-/** One entry of the online skin catalog (skins.agentsmirror.com). */
-export interface CatalogSkin {
-  id: string;
-  name: string;
-  description: string;
-  version: string;
-  author: string;
-  appearance: "dark" | "light" | "dual" | null;
-  license: string | null;
-  tags: string[];
-  codexVerified: string | null;
-  bytes: number;
-  sha256: string;
-  /** Catalog-relative paths, resolved backend-side against the pinned origin. */
-  pack: string;
-  preview: string;
-  /** Theme category for store grouping (anime/stars/tech/guofeng/games);
-   *  absent → grouped under "other". */
-  category?: string | null;
 }
 
 /** Main-window form factor: `compact` is the fixed 400×640 dashboard,

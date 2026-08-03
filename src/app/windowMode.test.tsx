@@ -47,9 +47,13 @@ function Bare() {
 
 async function expand() {
   fireEvent.click(screen.getByTitle(/expand workspace/i));
-  await waitFor(() =>
-    expect(document.documentElement.dataset.windowMode).toBe("expanded"),
-  );
+  await waitFor(() => {
+    expect(document.documentElement.dataset.windowMode).toBe("expanded");
+    // The provider stamps <html> immediately before React commits the expanded
+    // chrome. Waiting for the rail removes a scheduler-dependent race on slow
+    // Windows workers without weakening the user-visible assertion.
+    expect(screen.getByRole("navigation")).toBeInTheDocument();
+  });
 }
 
 describe("window modes", () => {

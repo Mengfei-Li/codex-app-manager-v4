@@ -106,14 +106,6 @@ pub fn data_dir() -> Option<PathBuf> {
     select_data_dir(smoke_data_dir_from_env(), production)
 }
 
-/// Manager cache directory for re-downloadable, non-critical content (currently
-/// catalog preview thumbnails). Safe to clear at any time — distinct from
-/// `data_dir`, which holds settings/provenance that must persist.
-pub fn cache_dir() -> Option<PathBuf> {
-    directories::ProjectDirs::from("io.github", "wangnov", "codexappmanager")
-        .map(|dirs| dirs.cache_dir().to_path_buf())
-}
-
 pub fn packaged_smoke_run_id() -> Option<String> {
     match smoke_data_dir_from_env() {
         SmokeDataDir::Valid { run_id, .. } => Some(run_id),
@@ -136,20 +128,6 @@ pub fn provenance_path() -> Option<PathBuf> {
 
 pub fn codex_home_dir() -> Option<PathBuf> {
     directories::UserDirs::new().map(|dirs| dirs.home_dir().join(".codex"))
-}
-
-/// Default Codex-skin store. macOS keeps it beside the manager's data
-/// (Application Support is the platform-correct home for app-managed
-/// content); Windows uses the LOCAL app-data root instead of the roaming
-/// one — skins are megabytes of re-downloadable content that must not ride
-/// a domain roaming profile.
-pub fn default_skins_store_dir() -> Option<PathBuf> {
-    let dirs = directories::ProjectDirs::from("io.github", "wangnov", "codexappmanager")?;
-    if cfg!(target_os = "windows") {
-        Some(dirs.data_local_dir().join("themes"))
-    } else {
-        Some(dirs.data_dir().join("themes"))
-    }
 }
 
 #[cfg(test)]

@@ -1,12 +1,20 @@
-# Initial cargo-deny policy for report-only CI. The audit job is intentionally
-# non-blocking while this policy is tuned against the real dependency graph.
+# V4 blocking dependency policy for the four supported release architectures.
+
+[graph]
+targets = [
+  "x86_64-pc-windows-msvc",
+  "aarch64-pc-windows-msvc",
+  "x86_64-apple-darwin",
+  "aarch64-apple-darwin",
+]
 
 [advisories]
-yanked = "warn"
+yanked = "deny"
 ignore = []
 
 [licenses]
 confidence-threshold = 0.8
+unused-allowed-license = "allow"
 allow = [
   "Apache-2.0",
   "Apache-2.0 WITH LLVM-exception",
@@ -24,14 +32,14 @@ allow = [
 
 [bans]
 multiple-versions = "warn"
-wildcards = "allow"
+wildcards = "deny"
 highlight = "all"
 deny = []
 skip = []
 skip-tree = []
 
 [sources]
-unknown-registry = "warn"
-unknown-git = "warn"
+unknown-registry = "deny"
+unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = []

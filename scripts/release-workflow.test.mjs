@@ -29,6 +29,9 @@ import {
 } from "./check-release-version.mjs";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+const bashExecutable =
+  process.env.BASH_EXE ??
+  (process.platform === "win32" ? "C:\\Program Files\\Git\\bin\\bash.exe" : "bash");
 const workflow = await readFile(
   join(repoRoot, ".github/workflows/release.yml"),
   "utf8",
@@ -175,7 +178,7 @@ describe("release workflow recovery invariants", () => {
       git("-C", source, "push", "origin", "main");
 
       expect(
-        execFileSync("bash", [gate, source, releaseSha, "main"], {
+        execFileSync(bashExecutable, [gate, source, releaseSha, "main"], {
           encoding: "utf8",
         }),
       ).toContain("is merged into origin/main");
@@ -186,7 +189,7 @@ describe("release workflow recovery invariants", () => {
       git("-C", source, "commit", "-m", "unmerged release");
       const unmergedSha = git("-C", source, "rev-parse", "HEAD");
       expect(() =>
-        execFileSync("bash", [gate, source, unmergedSha, "main"], {
+        execFileSync(bashExecutable, [gate, source, unmergedSha, "main"], {
           encoding: "utf8",
           stdio: "pipe",
         }),

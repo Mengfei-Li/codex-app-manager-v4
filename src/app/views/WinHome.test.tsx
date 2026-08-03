@@ -23,8 +23,6 @@ import { I18nProvider } from "../i18n";
 import { ThemeProvider } from "../theme";
 import { WinHome } from "./WinHome";
 
-vi.mock("../motion", () => ({ useHomeMotion: () => {} }));
-
 vi.mock("../../services/managerApi", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../services/managerApi")>();
   return {

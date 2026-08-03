@@ -7,7 +7,7 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [codex/v4-main]
 
 # Newer pushes to the same ref supersede in-flight runs.
 concurrency:
@@ -20,12 +20,12 @@ permissions:
 jobs:
   frontend:
     name: Frontend
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
-          node-version: 24
+          node-version: 24.16.0
           cache: npm
       - run: npm ci
       - name: Type-check
@@ -42,16 +42,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest]
+        os: [macos-15, windows-2025]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
-          node-version: 24
+          node-version: 24.16.0
           cache: npm
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4  # stable
         with:
+          toolchain: 1.97.1
           components: clippy
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
         with:
@@ -73,37 +74,58 @@ jobs:
         run: cargo test --manifest-path crates/codex-mac-engine/Cargo.toml --all-targets
       - name: Test codex-win-engine (standalone)
         run: cargo test --manifest-path crates/codex-win-engine/Cargo.toml --all-targets
-      - name: Test codex-theme-engine (standalone)
-        run: cargo test --manifest-path crates/codex-theme-engine/Cargo.toml --all-targets
 
   audit:
-    name: Audit (report)
-    runs-on: ubuntu-latest
-    continue-on-error: true
+    name: Blocking dependency audit
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
-          node-version: 24
+          node-version: 24.16.0
           cache: npm
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4  # stable
+        with:
+          toolchain: 1.97.1
       - run: npm ci
       - name: npm audit
-        continue-on-error: true
-        run: npm audit --audit-level=high
-      - name: Install cargo audit tools
-        continue-on-error: true
-        run: cargo install cargo-audit cargo-deny --locked
-      - name: cargo audit
-        continue-on-error: true
-        run: cargo audit --file src-tauri/Cargo.lock
-      - name: cargo deny
-        continue-on-error: true
-        run: cargo deny --manifest-path src-tauri/Cargo.toml check
+        run: npm audit --audit-level=low
+      - name: Install pinned cargo-deny
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive=cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz
+          curl --fail --location --silent --show-error \
+            --output "$archive" \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/$archive"
+          echo "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f  $archive" | sha256sum --check --strict
+          tar -xzf "$archive"
+          sudo install -m 0755 \
+            cargo-deny-0.20.2-x86_64-unknown-linux-musl/cargo-deny \
+            /usr/local/bin/cargo-deny
+      - name: Cargo advisories, licenses and sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          targets=(
+            x86_64-pc-windows-msvc
+            aarch64-pc-windows-msvc
+            x86_64-apple-darwin
+            aarch64-apple-darwin
+          )
+          for target in "${targets[@]}"; do
+            cargo deny \
+              --manifest-path src-tauri/Cargo.toml \
+              --config src-tauri/deny.toml \
+              --target "$target" \
+              --locked \
+              check advisories licenses sources \
+              --deny warnings
+          done
 
   worker-test:
     name: Cloudflare worker tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -138,7 +160,7 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         if: steps.changes.outputs.run == 'true'
         with:
-          node-version: 24
+          node-version: 24.16.0
           cache: npm
           cache-dependency-path: cloudflare/manager-download-router/package-lock.json
 

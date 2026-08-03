@@ -23,7 +23,6 @@ tauri-build = { version = "2.6.2", features = [] }
 [dependencies]
 base64 = "0.23"
 codex-mac-engine = { path = "../crates/codex-mac-engine" }
-codex-theme-engine = { path = "../crates/codex-theme-engine" }
 codex-win-engine = { path = "../crates/codex-win-engine" }
 directories = "6.0.0"
 fs4 = "1.1"
@@ -53,3 +52,8 @@ libc = "0.2"
 # by `WebviewWindow::with_webview` exposes these exact COM interfaces.
 webview2-com = "=0.38.2"
 windows-core = "0.61.2"
+
+[patch.crates-io]
+# V4 vendors the exact tauri-utils 2.9.3 crate and applies the one-line
+# urlpattern 0.3 -> 0.6 maintenance fix documented in vendor/tauri-utils/V4-PATCH.md.
+tauri-utils = { path = "../vendor/tauri-utils" }

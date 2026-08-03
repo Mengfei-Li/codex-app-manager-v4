@@ -11,18 +11,15 @@ import tseslint from "typescript-eslint";
 // wall-clock for no new signal.
 export default tseslint.config(
   {
-    // Frontend app only. The Node-side workspaces (build scripts, the
-    // Cloudflare worker, the website subproject) have their own tooling and
+    // Frontend app only. The Node-side workspaces (build scripts and the
+    // Cloudflare worker) have their own tooling and
     // Node globals — linting them here would just spew no-undef.
     ignores: [
       "dist/",
       "node_modules/",
       "src-tauri/",
-      // Rust crates; includes the injected renderer runtime template
-      // (crates/codex-theme-engine/src/runtime/), which is browser-side JS
-      // with substitution placeholders — not part of this app bundle.
       "crates/",
-      "website/",
+      "vendor/",
       "cloudflare/",
       "scripts/",
       "docs/",

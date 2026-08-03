@@ -40,7 +40,6 @@ describe("desktop trust-boundary config", () => {
     expect(capability.permissions).toEqual([
       "core:event:allow-listen",
       "core:event:allow-unlisten",
-      "core:webview:allow-internal-toggle-devtools",
       // Dragging + zooming are driven by our own drag-region handler
       // (windowDrag.ts) — the built-in internal-toggle-maximize is unused.
       "core:window:allow-start-dragging",
@@ -52,7 +51,6 @@ describe("desktop trust-boundary config", () => {
       // Window-mode switching stores the expanded size in logical px; the
       // renderer reads the monitor scale to convert onResized's physical px.
       "core:window:allow-scale-factor",
-      "dialog:allow-open",
       "process:allow-restart",
     ]);
     expect(capability.permissions).not.toContain("core:default");

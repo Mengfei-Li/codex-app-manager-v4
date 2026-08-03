@@ -12,9 +12,8 @@ import { Settings } from "./views/Settings";
 import { About } from "./views/About";
 import { Uninstall } from "./views/Uninstall";
 import { CodexConfig } from "./views/CodexConfig";
-import { CodexThemes } from "./views/CodexThemes";
 
-type View = "home" | "settings" | "about" | "uninstall" | "config" | "themes";
+type View = "home" | "settings" | "about" | "uninstall" | "config";
 
 function focusPageTarget(root: ParentNode | null) {
   if (!root) return;
@@ -42,7 +41,7 @@ function Shell() {
   // overlay it.
   //
   // That same persistence is why returning to Home has no entrance to play
-  // (Home neither re-mounts nor re-keys its GSAP scene), so it would hard-cut.
+  // (Home neither re-mounts nor re-keys its transition state), so it would hard-cut.
   // Cross-fade the window instead via the shared ::view-transition(root) rule —
   // no re-mount, no re-check. Forward / inter-sub-view nav keeps each view's own
   // staggered `.view` entrance, so only the return Home is wrapped.
@@ -69,7 +68,7 @@ function Shell() {
           Settings section. Jumping home reuses the same cross-fade as the
           NavBar back path so the two routes feel identical. */}
       <Rail
-        section={view === "home" ? "home" : view === "themes" ? "themes" : "settings"}
+        section={view === "home" ? "home" : "settings"}
         onNavigate={(section) => {
           const target: View = section;
           if (target === view) return;
@@ -87,13 +86,7 @@ function Shell() {
             onOpenAbout={() => setView("about")}
             onOpenUninstall={() => setView("uninstall")}
             onOpenConfig={() => setView("config")}
-            onOpenThemes={() => setView("themes")}
           />
-        </div>
-      ) : null}
-      {view === "themes" ? (
-        <div data-view="themes" style={{ display: "contents" }}>
-          <CodexThemes onBack={() => setView("settings")} />
         </div>
       ) : null}
       {view === "about" ? (

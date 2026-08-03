@@ -20,10 +20,8 @@ import { I18nProvider } from "../i18n";
 import { ThemeProvider } from "../theme";
 import { Home } from "./Home";
 
-// The state machine is what's under test — the GSAP choreography isn't, and
+// The state machine is what's under test — visual choreography isn't, and
 // SplitText/DrawSVG don't run reliably under jsdom.
-vi.mock("../motion", () => ({ useHomeMotion: () => {} }));
-
 vi.mock("../../services/managerApi", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../services/managerApi")>();
   return {

@@ -20,12 +20,11 @@ import {
   type FailureSurface,
 } from "../errorCopy";
 import { Icon, CodexGlyph } from "../icons";
-import { useI18n, dirOf, type TKey } from "../i18n";
+import { useI18n, type TKey } from "../i18n";
 import { Ring, TopBar, ResultBanner, ErrorHero, FailureBanner, StatusBanner } from "../components";
 import { currentPlatform } from "../platform";
 import { WinHome } from "./WinHome";
 import { mib, fmtDateTime } from "../format";
-import { useHomeMotion } from "../motion";
 import { Sheet } from "../Sheet";
 import { macSkippedUpdateCandidate, skippedUpdateMatches } from "../skippedUpdate";
 import {
@@ -524,15 +523,9 @@ function MacHome({ onOpenSettings }: { onOpenSettings: () => void }) {
     void managerApi.macLaunch().catch((cause) => setActionError(resolveFailure(cause, t)));
   };
 
-  // One string identifying the visible "scene"; when it changes the hero
-  // remounts and GSAP replays the choreographed entrance (see useHomeMotion).
-  // `lang` is part of the key so a language switch (Home stays mounted) remounts
-  // the headline and re-splits it — otherwise SplitText's aria-label would keep
-  // the old language's text for screen readers.
+  // One string identifying the visible scene. `lang` remains part of the key so
+  // a language switch refreshes the headline while Home stays mounted.
   const progressing = busy === "perform" || busy === "install";
-  // The paused screen is calm (no shimmer): the headline is a settled "已暂停",
-  // not an in-flight state.
-  const isShimmer = progressing || rechecking || kind === "loading";
   const scene = `${lang}/${
     paused
       ? `paused-${paused.kind}`
@@ -542,7 +535,6 @@ function MacHome({ onOpenSettings }: { onOpenSettings: () => void }) {
           ? "done"
           : `${kind}${rechecking ? "-checking" : ""}`
   }`;
-  const success = justInstalled || (!rechecking && kind === "uptodate");
   // Outcome-strip detail + persistence. Surface a relaunch-failure prompt and
   // any backend warning (provenance save failure, kept backup path), and pin the
   // strip — no auto-dismiss — whenever there's something to act on or read, so a
@@ -557,11 +549,6 @@ function MacHome({ onOpenSettings }: { onOpenSettings: () => void }) {
   const performPinned = Boolean(
     perform && (perform.rolledBack || perform.relaunchFailed || perform.warning),
   );
-  // Char-split only LTR scripts — splitting a cursive RTL script (Arabic) into
-  // per-char elements breaks its contextual letter joining.
-  const splitHeadline = !isShimmer && dirOf(lang) === "ltr";
-  useHomeMotion(scopeRef, scene, { splitHeadline, success });
-
   // ── progress (performing / installing / paused) takes over the whole screen ─
   if (busy === "perform" || busy === "install" || paused) {
     return (

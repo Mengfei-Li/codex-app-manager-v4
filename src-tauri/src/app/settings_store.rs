@@ -150,35 +150,6 @@ pub struct AppSettings {
     /// One exact Codex app update the user chose not to be reminded about.
     #[serde(default)]
     pub skipped_codex_update: Option<SkippedCodexUpdate>,
-    /// Persistent Codex UI theme selection (theme id), applied whenever the
-    /// manager launches Codex. None = stock appearance.
-    #[serde(default)]
-    pub codex_theme: Option<String>,
-    /// Extra local directory scanned for theme packages (a theme-studio
-    /// checkout during development). Packages here shadow managed ones by id.
-    #[serde(default)]
-    pub codex_theme_dir: Option<String>,
-    /// Where managed skins live (downloads, imports). None = the platform
-    /// default (`paths::default_skins_store_dir`). Changed via the theme
-    /// page, which migrates existing skins to the new location.
-    #[serde(default)]
-    pub codex_theme_store_dir: Option<String>,
-    /// User-defined local skin groups, in display order. Each holds an ordered
-    /// list of skin ids; a skin may sit in several groups. The source partitions
-    /// (store-installed vs dev-local) are derived from each skin's origin, not
-    /// stored here.
-    #[serde(default)]
-    pub skin_groups: Vec<SkinGroup>,
-}
-
-/// A user-defined grouping of local skins.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SkinGroup {
-    pub id: String,
-    pub name: String,
-    #[serde(default)]
-    pub skin_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -212,14 +183,6 @@ struct RawAppSettings {
     disable_codex_self_updates: bool,
     #[serde(default)]
     skipped_codex_update: Option<SkippedCodexUpdate>,
-    #[serde(default)]
-    codex_theme: Option<String>,
-    #[serde(default)]
-    codex_theme_dir: Option<String>,
-    #[serde(default)]
-    codex_theme_store_dir: Option<String>,
-    #[serde(default)]
-    skin_groups: Vec<SkinGroup>,
 }
 
 fn default_true() -> bool {
@@ -257,10 +220,6 @@ impl Default for AppSettings {
             custom_proxy_url: String::new(),
             disable_codex_self_updates: false,
             skipped_codex_update: None,
-            codex_theme: None,
-            codex_theme_dir: None,
-            codex_theme_store_dir: None,
-            skin_groups: Vec::new(),
         }
     }
 }
@@ -306,10 +265,6 @@ impl RawAppSettings {
                 custom_proxy_url: self.custom_proxy_url,
                 disable_codex_self_updates: self.disable_codex_self_updates,
                 skipped_codex_update: self.skipped_codex_update,
-                codex_theme: self.codex_theme,
-                codex_theme_dir: self.codex_theme_dir,
-                codex_theme_store_dir: self.codex_theme_store_dir,
-                skin_groups: self.skin_groups,
             },
             unknown_source,
             newer_schema,

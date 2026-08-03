@@ -97,7 +97,7 @@ jobs:
   # Every field is copied through the environment so event data is never
   # interpolated into shell source.
   preflight:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions: {}
     outputs:
       release_tag: ${{ steps.validate.outputs.release_tag }}
@@ -197,7 +197,7 @@ jobs:
   prepare:
     needs: preflight
     if: ${{ needs.preflight.result == 'success' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: release
     permissions:
       contents: read
@@ -223,7 +223,7 @@ jobs:
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 24
+          node-version: 24.16.0
 
       # Resolve the live tag through the API before any tag checkout. A
       # workflow_run must still point at the exact SHA carried by the successful
@@ -317,17 +317,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { platform: macos-latest, target: aarch64-apple-darwin, os: macos }
+          - { platform: macos-15, target: aarch64-apple-darwin, os: macos }
           # Intel build on GitHub's current x86_64 image — macos-13 retired
           # 2025-12; macos-15-intel is the last Intel image (until ~2027-08).
           - { platform: macos-15-intel, target: x86_64-apple-darwin, os: macos }
           - {
-              platform: windows-latest,
+              platform: windows-2025,
               target: x86_64-pc-windows-msvc,
               os: windows,
             }
           - {
-              platform: windows-latest,
+              platform: windows-2025,
               target: aarch64-pc-windows-msvc,
               os: windows,
             }
@@ -376,12 +376,13 @@ jobs:
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 24
+          node-version: 24.16.0
           cache: npm
           cache-dependency-path: release-source/package-lock.json
 
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
+          toolchain: 1.97.1
           targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
@@ -463,7 +464,7 @@ jobs:
           bash scripts/finalize-macos.sh "${{ matrix.target }}"
 
       # ── Windows: PE architecture diagnostic (especially ARM64 cross-build) ─
-      #    windows-latest is x64; aarch64-pc-windows-msvc is cross-compiled.
+      #    windows-2025 is x64; aarch64-pc-windows-msvc is cross-compiled.
       #    Hard-assert the main PE machine type (0xAA64 / 0x8664). The NSIS
       #    outer -setup.exe is an x86/x64 stub that embeds the payload, so we
       #    assert machine type on the app binary, not the setup wrapper.
@@ -613,7 +614,7 @@ jobs:
   select_artifacts:
     needs: [prepare, build]
     if: ${{ always() && needs.prepare.result == 'success' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       actions: read
       contents: read
@@ -682,7 +683,7 @@ jobs:
       actions: write # dispatch winget.yml after publishing (release events from GITHUB_TOKEN don't cascade)
       id-token: write # provenance attestations
       attestations: write
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Authorize credentialed job rerun actor
         shell: bash
@@ -718,7 +719,7 @@ jobs:
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 24
+          node-version: 24.16.0
 
       # Re-resolve tag policy on every release-job attempt. For manual recovery
       # this independently resolves the immutable tag; a signal run must still
@@ -1218,6 +1219,8 @@ jobs:
           cat SHA256SUMS
 
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: 1.97.1
 
       - name: Generate SBOMs
         id: sbom

@@ -30,7 +30,7 @@ permissions:
 
 jobs:
   winget:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       # No-op cleanly (warn, don't fail) until WINGET_TOKEN is configured, so
       # releases don't show a red X before the token + first bootstrap are done.

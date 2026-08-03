@@ -1,6 +1,6 @@
 //! Window form factor. The manager is a compact 400×640 popover by default
 //! (the at-a-glance dashboard) and expands into a desktop-sized workbench for
-//! space-hungry surfaces (theme gallery, future config editors). One window,
+//! space-hungry surfaces (diagnostics, future config editors). One window,
 //! two shapes: compact is fixed-size, expanded is user-resizable within a
 //! minimum, and both transitions keep the window's visual center in place,
 //! clamped into the current monitor's work area so no edge ends up off-screen.

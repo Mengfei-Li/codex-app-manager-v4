@@ -12,6 +12,11 @@ export default defineConfig({
   test: {
     exclude: [...configDefaults.exclude, ".claude/**"],
     environment: "jsdom",
+    // Release-invariant tests create local Git repositories and HTTP servers.
+    // Five seconds is routinely insufficient on cold or virus-scanned Windows
+    // hosts; keep the assertions intact while allowing deterministic cleanup.
+    testTimeout: 30_000,
+    hookTimeout: 30_000,
     environmentOptions: {
       jsdom: {
         url: "http://localhost/",

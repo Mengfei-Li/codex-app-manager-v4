@@ -539,8 +539,8 @@ export function StatusBanner({
           type="button"
           className="banner-close"
           onClick={onClose}
-          aria-label={t("themes.detail.close")}
-          title={t("themes.detail.close")}
+          aria-label={t("nav.close")}
+          title={t("nav.close")}
         >
           <Icon name="close" />
         </button>
@@ -686,7 +686,7 @@ export interface SegmentedItem {
  *  options instead of blinking in place. The pill carries the chrome (gradient +
  *  border + elevation) the selected button used to paint; JS writes the active
  *  button's offsetLeft / offsetWidth onto it and CSS owns the travel. Shared by
- *  the theme, check-frequency and proxy choosers. */
+ *  appearance, check-frequency and proxy choosers. */
 export function Segmented({
   items,
   value,
