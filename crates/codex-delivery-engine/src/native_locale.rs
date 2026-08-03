@@ -1,14 +1,26 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+#[cfg(target_os = "windows")]
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "windows")]
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-use crate::contract::{normalize_locale, LocaleContract, LocaleMode};
+#[cfg(target_os = "windows")]
+use crate::contract::normalize_locale;
+use crate::contract::{LocaleContract, LocaleMode};
 use crate::locale::{LocaleInitError, LocaleInitializer};
 
+#[cfg(any(test, target_os = "windows"))]
 const PINNED_WORKER_SHA256: &str =
     "758005ee4b9ea13993b7dc739f195eecfcd935e94e7d66fe015e86480b0d63ec";
+
+#[cfg(any(test, target_os = "windows"))]
+fn canonical_worker_sha256(bytes: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let canonical = text.replace("\r\n", "\n");
+    Some(crate::contract::sha256_hex(canonical.as_bytes()))
+}
 
 pub struct NativeLocaleInitializer {
     worker_path: Option<PathBuf>,
@@ -78,7 +90,7 @@ impl NativeLocaleInitializer {
         let worker_bytes =
             fs::read(worker).map_err(|_| locale_error("locale-worker-missing", false))?;
         if worker_bytes.len() > 64 * 1024
-            || crate::contract::sha256_hex(&worker_bytes) != PINNED_WORKER_SHA256
+            || canonical_worker_sha256(&worker_bytes).as_deref() != Some(PINNED_WORKER_SHA256)
         {
             return Err(locale_error("locale-worker-integrity", false));
         }
@@ -319,7 +331,10 @@ mod tests {
     #[test]
     fn packaged_windows_worker_is_present_pinned_and_declared_as_a_resource() {
         let worker = include_bytes!("../../../src-tauri/resources/i18n-relay-worker.ps1");
-        assert_eq!(crate::contract::sha256_hex(worker), PINNED_WORKER_SHA256);
+        assert_eq!(
+            canonical_worker_sha256(worker).as_deref(),
+            Some(PINNED_WORKER_SHA256)
+        );
         let tauri: serde_json::Value =
             serde_json::from_str(include_str!("../../../src-tauri/tauri.conf.json")).unwrap();
         assert!(tauri["bundle"]["resources"]
