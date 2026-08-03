@@ -1,0 +1,171 @@
+name: G5 capability and fault matrix
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/v4-main]
+  pull_request:
+    paths:
+      - "assets/**"
+      - "crates/**"
+      - "src/**"
+      - "src-tauri/**"
+      - "tests/g5/**"
+      - "scripts/g5-*"
+      - "scripts/hash-tree.mjs"
+      - ".github/workflows/g5-capability-fault-matrix.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: g5-capability-fault-matrix-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  source-contract:
+    name: Stable boundary and reproducible frontend
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.16.0
+          cache: npm
+      - run: npm ci
+      - name: Stable and experimental endpoint isolation
+        run: node scripts/g5-stable-boundary.mjs > g5-stable-boundary.json
+      - name: Frontend contracts and zero skipped tests
+        run: npm run check && npm run lint && npm test -- --run
+      - name: Repeat frontend production build
+        shell: bash
+        run: |
+          npm run build
+          first="$(node scripts/hash-tree.mjs dist)"
+          rm -rf dist
+          npm run build
+          second="$(node scripts/hash-tree.mjs dist)"
+          test "$first" = "$second"
+          printf '{"schema_version":1,"status":"passed","tree_sha256":"%s"}\n' \
+            "$second" > g5-reproducible-frontend.json
+      - name: Upload source evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g5-source-contract
+          path: |
+            g5-stable-boundary.json
+            g5-reproducible-frontend.json
+          if-no-files-found: error
+          retention-days: 30
+
+  dependency-audit:
+    name: Production dependency audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.16.0
+          cache: npm
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: 1.97.1
+      - run: npm ci
+      - name: npm production high and critical gate
+        run: npm audit --omit=dev --audit-level=high --registry=https://registry.npmjs.org
+      - name: RustSec high and critical gate
+        run: |
+          cargo install cargo-audit --locked --version 0.22.2
+          cargo audit --deny warnings --file src-tauri/Cargo.lock
+
+  native-fault-matrix:
+    name: ${{ matrix.name }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            runner: windows-2025
+            target: x86_64-pc-windows-msvc
+          - name: windows-arm64
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+          - name: macos-arm64
+            runner: macos-15
+            target: aarch64-apple-darwin
+          - name: macos-x64
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.16.0
+          cache: npm
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: 1.97.1
+          targets: ${{ matrix.target }}
+          components: clippy
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: |
+            src-tauri -> target
+            crates/codex-delivery-engine -> target
+      - run: npm ci
+      - name: Full Manager capability suite
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib -- --test-threads=1
+      - name: Zero-warning native lint
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+      - name: Windows resilience branches
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: tests/g5/run-windows-resilience.ps1 -OutputPath "artifacts/g5/windows-resilience.json"
+      - name: macOS URLSession lifecycle probe
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          mkdir -p artifacts/g5/urlsession-source artifacts/g5/urlsession-output
+          printf 'v4-urlsession-lifecycle-%s\n' '${{ matrix.name }}' \
+            > artifacts/g5/urlsession-source/payload.bin
+          python3 -m http.server 48081 --bind 127.0.0.1 \
+            --directory artifacts/g5/urlsession-source \
+            > artifacts/g5/urlsession-server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          swiftc tests/g5/URLSessionDownloadLifecycleProbe.swift \
+            -o artifacts/g5/urlsession-probe
+          artifacts/g5/urlsession-probe \
+            http://127.0.0.1:48081/payload.bin \
+            "$PWD/artifacts/g5/urlsession-output/payload.bin"
+          cmp artifacts/g5/urlsession-source/payload.bin \
+            artifacts/g5/urlsession-output/payload.bin
+          printf '{"schema_version":1,"status":"passed","loopback_only":true}\n' \
+            > artifacts/g5/macos-urlsession.json
+      - name: Four-architecture native release build
+        run: npm run tauri build -- --no-bundle --target ${{ matrix.target }}
+      - name: Write immutable G5 evidence
+        env:
+          G5_NAME: ${{ matrix.name }}
+          G5_RUNNER: ${{ matrix.runner }}
+          G5_TARGET: ${{ matrix.target }}
+          G5_SHA: ${{ github.sha }}
+          G5_RUN_ID: ${{ github.run_id }}
+        run: node scripts/g5-write-evidence.mjs
+      - name: Upload native G5 evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g5-native-${{ matrix.name }}
+          path: artifacts/g5
+          if-no-files-found: error
+          retention-days: 30

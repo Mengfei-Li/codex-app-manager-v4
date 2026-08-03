@@ -167,11 +167,8 @@ pub fn retry_latest_upload() -> Result<LatestDiagnosticReport, String> {
         return Err("diagnostic-bundle-state-mismatch".to_string());
     }
     let context = load_business_context();
-    let management_token = context
-        .as_ref()
-        .and_then(load_management_token)
-        .unwrap_or_default();
-    let mut transport = HttpBundleTransport::from_context(context.as_ref(), management_token);
+    let authorization = diagnostic_authorization(context.as_ref());
+    let mut transport = HttpBundleTransport::new(authorization.endpoint, authorization.token);
     let state_root = crate::app::paths::data_dir()
         .ok_or_else(|| "diagnostic-data-dir-unavailable".to_string())?
         .join("diagnostics")
@@ -240,10 +237,7 @@ fn finalize_failure_at<R: tauri::Runtime>(
         return None;
     }
 
-    let mut management_token = context
-        .as_ref()
-        .and_then(load_management_token)
-        .unwrap_or_default();
+    let mut authorization = diagnostic_authorization(context.as_ref());
     let structured = failure.structured();
     let failure_path = work.join("failure.json");
     let system_path = work.join("system.json");
@@ -255,7 +249,7 @@ fn finalize_failure_at<R: tauri::Runtime>(
         || write_private_atomic(&system_path, &system_bytes).is_err()
         || write_private_atomic(&events_path, &events_bytes).is_err()
     {
-        management_token.zeroize();
+        authorization.token.zeroize();
         return None;
     }
 
@@ -356,8 +350,8 @@ fn finalize_failure_at<R: tauri::Runtime>(
     if let Some(home) = directories::UserDirs::new() {
         redaction.add_home_path(home.home_dir().to_string_lossy().into_owned());
     }
-    if !management_token.is_empty() {
-        redaction.add_secret(management_token.as_bytes());
+    if !authorization.token.is_empty() {
+        redaction.add_secret(authorization.token.as_bytes());
     }
     let identity = DiagnosticIdentity {
         report_id: report_id.clone(),
@@ -366,7 +360,10 @@ fn finalize_failure_at<R: tauri::Runtime>(
             .as_ref()
             .and_then(|value| value.public_customer_id.clone()),
         order_id: context.as_ref().and_then(|value| value.order_id.clone()),
-        device_hash: context.as_ref().and_then(|value| value.device_hash.clone()),
+        device_hash: context
+            .as_ref()
+            .and_then(|value| value.device_hash.clone())
+            .or_else(|| authorization.device_hash.clone()),
         installation_id: context.as_ref().map(|value| value.installation_id.clone()),
         build_id: safe_identifier(&app.package_info().version.to_string(), "unknown-build"),
         os: safe_identifier(std::env::consts::OS, "unknown-os"),
@@ -414,10 +411,11 @@ fn finalize_failure_at<R: tauri::Runtime>(
     };
     let _ = operations.set_diagnostic_state(token, operation_state.clone());
 
-    let token_for_upload = management_token;
+    let endpoint_for_upload = authorization.endpoint;
+    let token_for_upload = authorization.token;
     let support_summary_for_upload = operation_state.support_summary.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let mut transport = HttpBundleTransport::from_context(context.as_ref(), token_for_upload);
+        let mut transport = HttpBundleTransport::new(endpoint_for_upload, token_for_upload);
         let state = upload_with_retry(&bundle, &state_root, UPLOAD_ATTEMPTS, &mut transport);
         let latest = latest_from_upload(&bundle, &support_summary_for_upload, state.as_ref().ok());
         let _ = persist_latest_at(&latest, &latest_path);
@@ -459,20 +457,58 @@ fn latest_from_upload(
     }
 }
 
+struct DiagnosticAuthorization {
+    endpoint: Option<Url>,
+    token: Zeroizing<String>,
+    device_hash: Option<String>,
+}
+
+fn diagnostic_authorization(
+    context: Option<&DiagnosticBusinessContext>,
+) -> DiagnosticAuthorization {
+    if let Some(context) = context {
+        if let Some(token) = load_management_token(context) {
+            return DiagnosticAuthorization {
+                endpoint: runtime_diagnostic_endpoint(context),
+                token,
+                device_hash: context.device_hash.clone(),
+            };
+        }
+    }
+    match crate::delivery_runtime::bootstrap_diagnostic_authorization() {
+        Ok(Some(authorization)) => DiagnosticAuthorization {
+            endpoint: runtime_diagnostic_endpoint_url(authorization.diagnostic_endpoint),
+            token: authorization.token,
+            device_hash: authorization.device_hash,
+        },
+        Ok(None) => DiagnosticAuthorization {
+            endpoint: None,
+            token: Zeroizing::new(String::new()),
+            device_hash: None,
+        },
+        Err(error) => {
+            log::warn!(
+                "V4 bootstrap diagnostic authorization unavailable code={} stage={}",
+                error.code,
+                error.stage
+            );
+            DiagnosticAuthorization {
+                endpoint: None,
+                token: Zeroizing::new(String::new()),
+                device_hash: None,
+            }
+        }
+    }
+}
+
 struct HttpBundleTransport {
     client: Option<Client>,
     endpoint: Option<Url>,
-    management_token: Zeroizing<String>,
+    authorization_secret: Zeroizing<String>,
 }
 
 impl HttpBundleTransport {
-    fn from_context(
-        context: Option<&DiagnosticBusinessContext>,
-        management_token: Zeroizing<String>,
-    ) -> Self {
-        let endpoint = context
-            .and_then(|value| Url::parse(&value.diagnostic_endpoint).ok())
-            .filter(valid_endpoint);
+    fn new(endpoint: Option<Url>, authorization_secret: Zeroizing<String>) -> Self {
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(30))
@@ -482,9 +518,53 @@ impl HttpBundleTransport {
         Self {
             client,
             endpoint,
-            management_token,
+            authorization_secret,
         }
     }
+}
+
+fn runtime_diagnostic_endpoint(context: &DiagnosticBusinessContext) -> Option<Url> {
+    let endpoint = Url::parse(&context.diagnostic_endpoint).ok()?;
+    runtime_diagnostic_endpoint_url(endpoint)
+}
+
+fn runtime_diagnostic_endpoint_url(endpoint: Url) -> Option<Url> {
+    let smoke = crate::app::paths::packaged_smoke_run_id().is_some();
+    let explicit = std::env::var("CAM_DIAGNOSTIC_TEST_ENDPOINT").ok();
+    select_runtime_diagnostic_endpoint_url(endpoint, smoke, explicit.as_deref())
+}
+
+#[cfg(test)]
+fn select_runtime_diagnostic_endpoint(
+    context: &DiagnosticBusinessContext,
+    smoke: bool,
+    explicit_test_endpoint: Option<&str>,
+) -> Option<Url> {
+    let endpoint = Url::parse(&context.diagnostic_endpoint)
+        .ok()
+        .filter(valid_endpoint)?;
+    select_runtime_diagnostic_endpoint_url(endpoint, smoke, explicit_test_endpoint)
+}
+
+fn select_runtime_diagnostic_endpoint_url(
+    endpoint: Url,
+    smoke: bool,
+    explicit_test_endpoint: Option<&str>,
+) -> Option<Url> {
+    if !valid_endpoint(&endpoint) {
+        return None;
+    }
+    if !smoke {
+        return Some(endpoint);
+    }
+    if endpoint
+        .host_str()
+        .is_some_and(|host| matches!(host, "127.0.0.1" | "localhost" | "::1"))
+    {
+        return Some(endpoint);
+    }
+    let explicitly_allowed = explicit_test_endpoint.is_some_and(|value| value == endpoint.as_str());
+    explicitly_allowed.then_some(endpoint)
 }
 
 #[derive(Deserialize)]
@@ -507,13 +587,13 @@ impl BundleTransport for HttpBundleTransport {
             .endpoint
             .clone()
             .ok_or_else(|| "unauthorized-context".to_string())?;
-        if self.management_token.is_empty() {
+        if self.authorization_secret.is_empty() {
             return Err("unauthorized-token".to_string());
         }
         let file = File::open(&bundle.path).map_err(|_| "bundle-open".to_string())?;
         let response = client
             .post(endpoint)
-            .bearer_auth(self.management_token.as_str())
+            .bearer_auth(self.authorization_secret.as_str())
             .header("content-type", "application/zip")
             .header("x-diagnostic-report-id", &bundle.report_id)
             .header("x-bundle-sha256", &bundle.sha256)
@@ -840,5 +920,50 @@ mod tests {
         assert!(!serde_json::to_string(&structured)
             .unwrap()
             .contains("secret raw detail"));
+    }
+
+    #[test]
+    fn packaged_smoke_never_uses_production_diagnostics_without_exact_opt_in() {
+        let context = DiagnosticBusinessContext {
+            schema_version: 1,
+            public_customer_id: None,
+            order_id: None,
+            device_hash: None,
+            installation_id: "installation".to_string(),
+            credential_service: "service".to_string(),
+            credential_account: "account".to_string(),
+            diagnostic_endpoint: "https://portal.example/api/installer/v4/diagnostics/bundles"
+                .to_string(),
+        };
+        assert!(select_runtime_diagnostic_endpoint(&context, true, None).is_none());
+        assert!(select_runtime_diagnostic_endpoint(
+            &context,
+            true,
+            Some("https://other.example/api/installer/v4/diagnostics/bundles")
+        )
+        .is_none());
+        assert!(select_runtime_diagnostic_endpoint(
+            &context,
+            true,
+            Some("https://portal.example/api/installer/v4/diagnostics/bundles")
+        )
+        .is_some());
+        assert!(select_runtime_diagnostic_endpoint(&context, false, None).is_some());
+    }
+
+    #[test]
+    fn packaged_smoke_allows_loopback_diagnostics_without_external_side_effects() {
+        let context = DiagnosticBusinessContext {
+            schema_version: 1,
+            public_customer_id: None,
+            order_id: None,
+            device_hash: None,
+            installation_id: "installation".to_string(),
+            credential_service: "service".to_string(),
+            credential_account: "account".to_string(),
+            diagnostic_endpoint: "http://127.0.0.1:48081/api/installer/v4/diagnostics/bundles"
+                .to_string(),
+        };
+        assert!(select_runtime_diagnostic_endpoint(&context, true, None).is_some());
     }
 }

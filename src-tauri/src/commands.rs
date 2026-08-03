@@ -50,6 +50,50 @@ use crate::domain::target::OperatingSystem;
 use crate::errors::{AppError, CommandError};
 use crate::state::ManagerState;
 
+fn delivery_command_error(error: crate::delivery_runtime::DeliveryRuntimeError) -> CommandError {
+    CommandError {
+        code: error.code.clone(),
+        message: format!(
+            "V4 delivery failed at {} ({}; retryable={})",
+            error.stage, error.code, error.retryable
+        ),
+    }
+}
+
+async fn run_v4_delivery(app: &AppHandle, operation_id: String) -> Result<(), CommandError> {
+    let delivery_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::delivery_runtime::run_after_platform_install(&delivery_app, &operation_id, true)
+    })
+    .await
+    .map_err(|error| AppError::Internal(format!("delivery join: {error}")))?
+    .map(|_| ())
+    .map_err(delivery_command_error)
+}
+
+async fn complete_attached_v4_delivery(
+    app: &AppHandle,
+    operation: &mut DiagnosticOperationGuard,
+) -> Result<(), CommandError> {
+    let operations = operation.operations.clone();
+    let token = operation.token().clone();
+    let _ = operations.set_phase(&token, OperationPhase::Verifying);
+    match run_v4_delivery(app, token.0.clone()).await {
+        Ok(()) => {
+            let _ = operations.record_completion(&token, true);
+            operation.succeeded = true;
+            Ok(())
+        }
+        Err(error) => {
+            operation.failure = Some(crate::v4_diagnostics::FailureDescriptor::from_command(
+                &error,
+                OperationPhase::Verifying.as_str(),
+            ));
+            Err(error)
+        }
+    }
+}
+
 fn normalize_windows_source_base(raw: &str) -> Option<String> {
     let mut base = raw.trim().trim_end_matches('/').to_string();
     if base.is_empty() {
@@ -288,6 +332,80 @@ fn begin_guard(state: &ManagerState, kind: OperationKind) -> Result<OperationGua
             AppError::from(err)
         })
         .map_err(Into::into)
+}
+
+struct DiagnosticOperationGuard {
+    app: AppHandle,
+    failure: Option<crate::v4_diagnostics::FailureDescriptor>,
+    guard: Option<OperationGuard>,
+    operations: OperationManager,
+    succeeded: bool,
+}
+
+impl DiagnosticOperationGuard {
+    fn begin(
+        app: &AppHandle,
+        state: &ManagerState,
+        kind: OperationKind,
+    ) -> Result<Self, CommandError> {
+        let guard = begin_guard(state, kind)?;
+        Ok(Self {
+            app: app.clone(),
+            failure: None,
+            guard: Some(guard),
+            operations: state.operations.clone(),
+            succeeded: false,
+        })
+    }
+
+    fn token(&self) -> &OperationToken {
+        self.guard
+            .as_ref()
+            .expect("diagnostic operation guard must own the operation lease")
+            .token()
+    }
+
+    fn capture<T>(&mut self, result: Result<T, CommandError>) -> Result<T, CommandError> {
+        if let Err(error) = &result {
+            let stage = self
+                .operations
+                .snapshot()
+                .map(|snapshot| snapshot.phase.as_str().to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            self.failure = Some(crate::v4_diagnostics::FailureDescriptor::from_command(
+                error, &stage,
+            ));
+        }
+        result
+    }
+}
+
+impl Drop for DiagnosticOperationGuard {
+    fn drop(&mut self) {
+        let Some(guard) = self.guard.as_ref() else {
+            return;
+        };
+        let token = guard.token();
+        if !self.succeeded {
+            let stage = self
+                .operations
+                .snapshot()
+                .map(|snapshot| snapshot.phase.as_str().to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            let failure = self
+                .failure
+                .take()
+                .unwrap_or_else(|| crate::v4_diagnostics::FailureDescriptor::generic(&stage));
+            if crate::v4_diagnostics::finalize_failure(&self.app, &self.operations, token, failure)
+                .is_none()
+            {
+                log::error!("failed to finalize attached V4 diagnostic bundle");
+            }
+            if let Err(error) = self.operations.record_completion(token, false) {
+                log::error!("failed to record attached terminal operation outcome: {error}");
+            }
+        }
+    }
 }
 
 struct DetachedGuard {
@@ -844,6 +962,10 @@ pub async fn mac_perform_update(
     let phase_token = op.token_clone();
     let progress_token = phase_token.clone();
     let progress_ops = ops.clone();
+    let delivery_operation_id = op
+        .token_clone()
+        .map(|token| token.0)
+        .ok_or_else(|| AppError::Internal("missing operation token".to_string()))?;
     let result: Result<MacPerformReport, CommandError> =
         match tauri::async_runtime::spawn_blocking(move || {
             let report = move |p: crate::app::mac_update::DownloadProgress| {
@@ -879,7 +1001,13 @@ pub async fn mac_perform_update(
             Ok(result) => result.map_err(Into::into),
             Err(error) => Err(AppError::Internal(format!("join: {error}")).into()),
         };
-    op.finish(result)
+    let report = match result {
+        Ok(report) => report,
+        Err(error) => return op.finish(Err(error)),
+    };
+    op.set_phase(OperationPhase::Verifying);
+    op.finish(run_v4_delivery(&app, delivery_operation_id).await)?;
+    Ok(report)
 }
 
 /// macOS-only: classify the installed Codex (managed / external / none).
@@ -893,12 +1021,21 @@ pub fn mac_status(state: State<'_, ManagerState>) -> Result<MacInstallStatus, Co
 
 /// macOS-only: adopt the detected external install (after explicit user consent).
 #[tauri::command]
-pub fn mac_adopt(state: State<'_, ManagerState>) -> Result<MacInstallStatus, CommandError> {
+pub async fn mac_adopt(
+    app: AppHandle,
+    state: State<'_, ManagerState>,
+) -> Result<MacInstallStatus, CommandError> {
     if !matches!(state.target.os, OperatingSystem::Macos) {
         return Err(AppError::UnsupportedPlatform.into());
     }
-    let _op = begin_guard(&state, OperationKind::Adopt)?;
-    crate::app::mac_update::mac_adopt().map_err(Into::into)
+    let mut op = DiagnosticOperationGuard::begin(&app, &state, OperationKind::Adopt)?;
+    let result = tauri::async_runtime::spawn_blocking(crate::app::mac_update::mac_adopt)
+        .await
+        .map_err(|error| CommandError::from(AppError::Internal(format!("join: {error}"))))
+        .and_then(|result| result.map_err(CommandError::from));
+    let status = op.capture(result)?;
+    complete_attached_v4_delivery(&app, &mut op).await?;
+    Ok(status)
 }
 
 /// macOS-only: let the user pick an existing Codex install and validate it.
@@ -937,15 +1074,22 @@ pub async fn mac_pick_existing_install(
 
 /// macOS-only: adopt the user-selected Codex.app path.
 #[tauri::command]
-pub fn mac_adopt_path(
+pub async fn mac_adopt_path(
+    app: AppHandle,
     state: State<'_, ManagerState>,
     path: String,
 ) -> Result<MacInstallStatus, CommandError> {
     if !matches!(state.target.os, OperatingSystem::Macos) {
         return Err(AppError::UnsupportedPlatform.into());
     }
-    let _op = begin_guard(&state, OperationKind::Adopt)?;
-    adopt_macos_path(Path::new(&path)).map_err(Into::into)
+    let mut op = DiagnosticOperationGuard::begin(&app, &state, OperationKind::Adopt)?;
+    let result = tauri::async_runtime::spawn_blocking(move || adopt_macos_path(Path::new(&path)))
+        .await
+        .map_err(|error| CommandError::from(AppError::Internal(format!("join: {error}"))))
+        .and_then(|result| result.map_err(CommandError::from));
+    let status = op.capture(result)?;
+    complete_attached_v4_delivery(&app, &mut op).await?;
+    Ok(status)
 }
 
 /// macOS-only: open the installed Codex.app (explicit 〔打开 Codex〕 action).
@@ -967,19 +1111,21 @@ pub async fn mac_install(
     if !cfg!(target_os = "macos") {
         return Err(AppError::UnsupportedPlatform.into());
     }
-    let op = begin_guard(&state, OperationKind::Install)?;
+    let mut op = DiagnosticOperationGuard::begin(&app, &state, OperationKind::Install)?;
     let token = op.token().clone();
     let ops = state.operations.clone();
     let _ = ops.set_phase(&token, OperationPhase::Preparing);
-    let network = mac_network_config_for_settings()?;
+    let network_result = mac_network_config_for_settings().map_err(CommandError::from);
+    let network = op.capture(network_result)?;
     let progress_token = token.clone();
     let progress_ops = ops.clone();
     let phase_token = token.clone();
     let phase_ops = ops.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let progress_app = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
         let report = move |p: crate::app::mac_update::DownloadProgress| {
             emit_op_download_progress(
-                &app,
+                &progress_app,
                 &progress_ops,
                 &progress_token,
                 "mac://download-progress",
@@ -994,8 +1140,11 @@ pub async fn mac_install(
         install_macos_with_network_and_phase(&report, &network, Some(&phase_hook))
     })
     .await
-    .map_err(|e| AppError::Internal(format!("join: {e}")))?
-    .map_err(Into::into)
+    .map_err(|error| CommandError::from(AppError::Internal(format!("join: {error}"))))
+    .and_then(|result| result.map_err(CommandError::from));
+    let result = op.capture(result)?;
+    complete_attached_v4_delivery(&app, &mut op).await?;
+    Ok(result)
 }
 
 /// macOS-only: request pausing an active package download.
@@ -1478,16 +1627,25 @@ pub async fn win_pick_existing_install(
 
 /// Windows-only: adopt the user-selected Codex directory.
 #[tauri::command]
-pub fn win_adopt_path(
+pub async fn win_adopt_path(
+    app: AppHandle,
     state: State<'_, ManagerState>,
     path: String,
 ) -> Result<WinInstallStatus, CommandError> {
     if !matches!(state.target.os, OperatingSystem::Windows) {
         return Err(AppError::UnsupportedPlatform.into());
     }
-    let _op = begin_guard(&state, OperationKind::Adopt)?;
+    let mut op = DiagnosticOperationGuard::begin(&app, &state, OperationKind::Adopt)?;
     let settings = windows_domain_settings_for_persisted(&state);
-    adopt_windows_path(&settings, Path::new(&path)).map_err(Into::into)
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        adopt_windows_path(&settings, Path::new(&path))
+    })
+    .await
+    .map_err(|error| CommandError::from(AppError::Internal(format!("join: {error}"))))
+    .and_then(|result| result.map_err(CommandError::from));
+    let status = op.capture(result)?;
+    complete_attached_v4_delivery(&app, &mut op).await?;
+    Ok(status)
 }
 
 /// Windows-only: persist a validated portable install root.
@@ -1921,16 +2079,22 @@ pub async fn win_status(state: State<'_, ManagerState>) -> Result<WinInstallStat
 ///
 /// Async + `spawn_blocking` so filesystem / provenance work stays off the UI thread.
 #[tauri::command]
-pub async fn win_adopt(state: State<'_, ManagerState>) -> Result<WinInstallStatus, CommandError> {
+pub async fn win_adopt(
+    app: AppHandle,
+    state: State<'_, ManagerState>,
+) -> Result<WinInstallStatus, CommandError> {
     if !matches!(state.target.os, OperatingSystem::Windows) {
         return Err(AppError::UnsupportedPlatform.into());
     }
-    let _op = begin_guard(&state, OperationKind::Adopt)?;
+    let mut op = DiagnosticOperationGuard::begin(&app, &state, OperationKind::Adopt)?;
     let settings = windows_domain_settings_for_persisted(&state);
-    tauri::async_runtime::spawn_blocking(move || adopt_windows_install(&settings))
+    let result = tauri::async_runtime::spawn_blocking(move || adopt_windows_install(&settings))
         .await
-        .map_err(|e| AppError::Internal(format!("join: {e}")))?
-        .map_err(Into::into)
+        .map_err(|error| CommandError::from(AppError::Internal(format!("join: {error}"))))
+        .and_then(|result| result.map_err(CommandError::from));
+    let status = op.capture(result)?;
+    complete_attached_v4_delivery(&app, &mut op).await?;
+    Ok(status)
 }
 
 /// Windows-only: open the installed Codex.
@@ -1990,6 +2154,10 @@ pub async fn win_perform_update(
     let install_mode = windows_install_mode_for_settings();
     let network = win_network_config_for_settings()?;
     let progress_app = app.clone();
+    let delivery_operation_id = op
+        .token_clone()
+        .map(|token| token.0)
+        .ok_or_else(|| AppError::Internal("missing operation token".to_string()))?;
     let ops = op.operations();
     let phase_token = op.token_clone();
     let progress_token = phase_token.clone();
@@ -2057,6 +2225,8 @@ pub async fn win_perform_update(
         // Best-effort: the stale sweep reclaims a leftover, so a cleanup failure
         // must not turn a successful install into an error.
         let _ = crate::app::staging::clear_download_cache();
+        op.set_phase(OperationPhase::Verifying);
+        op.finish(run_v4_delivery(&app, delivery_operation_id).await)?;
     }
     op.mark_succeeded();
     Ok(report)

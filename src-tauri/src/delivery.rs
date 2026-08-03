@@ -11,6 +11,7 @@ use reqwest::blocking::Client;
 use reqwest::redirect::Policy;
 use serde::{Deserialize, Serialize};
 use url::Url;
+use zeroize::Zeroizing;
 
 const MAX_CLAIM_RESPONSE_BYTES: u64 = 1024 * 1024;
 const MAX_BOOTSTRAP_SIDECAR_BYTES: u64 = 64 * 1024;
@@ -28,6 +29,10 @@ pub struct LoadedBootstrapSidecar {
 impl LoadedBootstrapSidecar {
     pub fn envelope(&self) -> &SignedBootstrapEnvelope {
         &self.envelope
+    }
+
+    pub fn bootstrap_token(&self) -> Zeroizing<String> {
+        Zeroizing::new(self.envelope.payload.bootstrap_token.clone())
     }
 
     pub fn retire(self) -> Result<(), BootstrapSidecarError> {

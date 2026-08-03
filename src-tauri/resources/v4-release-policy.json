@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "state": "unpublished",
+  "public_key_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "issuer": "provider-codex-v4",
+  "audience": "codex-app-manager",
+  "build_id": "unpublished-v4-build",
+  "claim_endpoint_id": "customer-portal-v4-claim",
+  "claim_endpoint_url": "https://placeholder.invalid/api/bootstrap/v4/claim",
+  "diagnostic_endpoint": "https://placeholder.invalid/api/installer/v4/diagnostics/bundles",
+  "allowed_api_origins": [
+    "https://placeholder.invalid/v1"
+  ]
+}

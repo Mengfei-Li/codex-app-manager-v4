@@ -670,6 +670,20 @@ Section Install
   ; Copy main executable
   File "${MAINBINARYSRCPATH}"
 
+  ; [provider-codex-v4] The customer portal ships a generic signed manager plus
+  ; a separately signed per-customer bootstrap sidecar in the same archive.
+  ; Preserve that sidecar across the NSIS relocation so the installed manager
+  ; can consume it after ChatGPT passes its platform health gate.  Updates that
+  ; do not carry a sidecar leave the already-provisioned installation untouched.
+  ${If} ${FileExists} "$EXEDIR\bootstrap.v4.json"
+    ClearErrors
+    Delete "$INSTDIR\bootstrap.v4.json"
+    CopyFiles /SILENT "$EXEDIR\bootstrap.v4.json" "$INSTDIR\bootstrap.v4.json"
+    ${If} ${Errors}
+      Abort "Unable to preserve the signed V4 bootstrap sidecar."
+    ${EndIf}
+  ${EndIf}
+
   ; Copy resources
   {{#each resources_dirs}}
     CreateDirectory "$INSTDIR\\{{this}}"

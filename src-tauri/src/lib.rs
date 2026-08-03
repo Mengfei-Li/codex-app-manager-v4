@@ -2,6 +2,7 @@ pub mod adapters;
 pub mod app;
 pub mod commands;
 pub mod delivery;
+mod delivery_runtime;
 pub mod domain;
 pub mod errors;
 
