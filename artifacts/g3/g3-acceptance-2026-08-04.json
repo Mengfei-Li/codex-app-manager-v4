@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "gate": "G3",
+  "decision": "pass",
+  "accepted_at": "2026-08-04T05:01:53+08:00",
+  "repository": "Mengfei-Li/codex-app-manager-v4",
+  "branch": "codex/v4-main",
+  "commit": "4ea91c2001ab2c4c5c42af2e2b61a99a1cf41453",
+  "production_changed": false,
+  "required_workflows": 5,
+  "successful_workflows": 5,
+  "required_jobs": 17,
+  "successful_jobs": 17,
+  "failed_jobs": 0,
+  "runs": [
+    {"id": 30851483616, "name": "G3 business delivery", "conclusion": "success"},
+    {"id": 30851483656, "name": "CI", "conclusion": "success"},
+    {"id": 30851483727, "name": "Windows installer check", "conclusion": "success"},
+    {"id": 30851483682, "name": "G2 platform kernel", "conclusion": "success"},
+    {"id": 30851483766, "name": "macOS packaged smoke", "conclusion": "success"}
+  ],
+  "jobs": [
+    {"id": 91812365154, "run_id": 30851483616, "name": "PostgreSQL claim state machine", "conclusion": "success"},
+    {"id": 91812365184, "run_id": 30851483616, "name": "macos-x64", "conclusion": "success"},
+    {"id": 91812365196, "run_id": 30851483616, "name": "windows-x64", "conclusion": "success"},
+    {"id": 91812365218, "run_id": 30851483616, "name": "macos-arm64", "conclusion": "success"},
+    {"id": 91812365265, "run_id": 30851483616, "name": "windows-arm64", "conclusion": "success"},
+    {"id": 91812318209, "run_id": 30851483656, "name": "Blocking dependency audit", "conclusion": "success"},
+    {"id": 91812318216, "run_id": 30851483656, "name": "Rust (macos-15)", "conclusion": "success"},
+    {"id": 91812318242, "run_id": 30851483656, "name": "Rust (windows-2025)", "conclusion": "success"},
+    {"id": 91812318247, "run_id": 30851483656, "name": "Cloudflare worker tests", "conclusion": "success"},
+    {"id": 91812318469, "run_id": 30851483656, "name": "Frontend", "conclusion": "success"},
+    {"id": 91812352165, "run_id": 30851483727, "name": "nsis", "conclusion": "success"},
+    {"id": 91812404260, "run_id": 30851483682, "name": "windows-x64", "conclusion": "success"},
+    {"id": 91812404343, "run_id": 30851483682, "name": "windows-arm64", "conclusion": "success"},
+    {"id": 91812404371, "run_id": 30851483682, "name": "macos-arm64", "conclusion": "success"},
+    {"id": 91812404390, "run_id": 30851483682, "name": "macos-x64", "conclusion": "success"},
+    {"id": 91812429963, "run_id": 30851483766, "name": "arm64 / Simplified Chinese", "conclusion": "success"},
+    {"id": 91812429997, "run_id": 30851483766, "name": "x64 / English", "conclusion": "success"}
+  ],
+  "artifacts": [
+    {"id": 8871091884, "run_id": 30851483616, "name": "g3-delivery-macos-x64", "size_in_bytes": 538, "digest": "sha256:011d0a315cc0b0b06af816d7bd46f6e790b3fd6a5d2c1fbbbcfcd4eca7957f74"},
+    {"id": 8871084167, "run_id": 30851483616, "name": "g3-delivery-windows-arm64", "size_in_bytes": 541, "digest": "sha256:db0b505cd2419d5cef111307df4e6251804683c846aeed0ba5b0b950bde6d395"},
+    {"id": 8871082664, "run_id": 30851483616, "name": "g3-delivery-windows-x64", "size_in_bytes": 538, "digest": "sha256:ff8167c034abf3b2507248a534a319788e4f6c2e71fdbb4a0d18ca874e9667b6"},
+    {"id": 8870914644, "run_id": 30851483616, "name": "g3-delivery-macos-arm64", "size_in_bytes": 536, "digest": "sha256:8a80defbd6d87dd2fb9e8ec0ea2f822622afc1a0cd91353396eb0e6a0973dd9e"},
+    {"id": 8870776940, "run_id": 30851483616, "name": "g3-postgres-claim", "size_in_bytes": 298, "digest": "sha256:fa608e533f14164ee9cbbd8d1b85b8afbc25f674f7feb285834c57c24ca7d5b5"},
+    {"id": 8870970601, "run_id": 30851483727, "name": "nsis-installer", "size_in_bytes": 4939837, "digest": "sha256:ca3750ab7ac74c476cdd7bf207c1492ac51e910c21f9686ddddca4b0060c04d3"},
+    {"id": 8871028113, "run_id": 30851483682, "name": "g2-platform-windows-arm64", "size_in_bytes": 448, "digest": "sha256:788b2194cde62fff6a0045388f886f1e3c3d7ad3a6f22fd147ac0f9ce8c0076d"},
+    {"id": 8870986817, "run_id": 30851483682, "name": "g2-platform-windows-x64", "size_in_bytes": 443, "digest": "sha256:79a2f0dd90a5d49ab02bbd8e7f03cbfbde0a5d8b97bd5bd389cee931e0a2649e"},
+    {"id": 8870977721, "run_id": 30851483682, "name": "g2-platform-macos-x64", "size_in_bytes": 447, "digest": "sha256:02df6c4a426bfbe6ec102780f2fceaff23ae5ff7c786232b58ef127010195666"},
+    {"id": 8870873433, "run_id": 30851483682, "name": "g2-platform-macos-arm64", "size_in_bytes": 446, "digest": "sha256:48bcf1f2a97683d1e31b2872863966d96e6cedbe5a63cc3daf0a8dfc38c7da77"},
+    {"id": 8871183569, "run_id": 30851483766, "name": "macos-smoke-logs-x86_64-apple-darwin", "size_in_bytes": 1003, "digest": "sha256:e38b58cd75d0e0415be8931cee4d6ae147fca4bc0ee2fbc8ab0d4dfeea4b7ee8"},
+    {"id": 8870952938, "run_id": 30851483766, "name": "macos-smoke-logs-aarch64-apple-darwin", "size_in_bytes": 1012, "digest": "sha256:20ef42534940b600739b5292e83a52c4261dc220c9b7109db217ed59c9fdd6b2"}
+  ],
+  "local_regression": {
+    "delivery_engine": {"passed": 49, "failed": 0},
+    "tauri_delivery_adapter": {"passed": 5, "failed": 0},
+    "portal": {"passed": 107, "failed": 0},
+    "delivery_clippy_warnings": 0
+  },
+  "contract_hashes": {
+    "full_model_catalog_canonical_lf": "a61fbe6d2a5bed953fb0e08e9f9e22b78715e5f8802fe2c2c0dcb41ad6a9acda",
+    "portal_claim_sql_normalized": "1fe88f4bb8eb0757701d04a367bfcf39961624742586a38d8ea9285bc9799234b",
+    "portal_claim_fixture": "06c2503eb6c816c16316fd235e63431d74044598542e9b3061e20f09726110f7",
+    "locale_worker_canonical_lf": "758005be20b2834994bfd4f1d52c18d67ae95d1f94c4ed8c5f3dac48571863ec"
+  },
+  "capabilities_evidenced": 29,
+  "scope_note": "G3 proves the isolated business claim, transactional configuration, locale, migration, app/API/CLI/usage verification, secret-redaction, and four-native-target contracts. It does not change production V2. Real release signing/notarization and four-device production-candidate acceptance remain blocking G6 requirements."
+}
