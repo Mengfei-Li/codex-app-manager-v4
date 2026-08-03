@@ -18,6 +18,7 @@ use crate::app::atomic_file::{read_with_recovery, write_atomic};
 const SCHEMA_VERSION: u32 = 1;
 const DEFAULT_EXPIRY: Duration = Duration::from_secs(24 * 60 * 60);
 const SIGNING_DOMAIN: &[u8] = b"codex-app-manager-v4/reboot-continuation/v1";
+#[cfg(windows)]
 const RUN_ONCE_VALUE: &str = "CodexAppManagerV4Resume";
 static RESUME_ATTEMPT_ACTIVE: AtomicBool = AtomicBool::new(false);
 
@@ -229,7 +230,7 @@ pub fn schedule_run_once(receipt_id: &str) -> Result<(), String> {
     #[cfg(not(windows))]
     {
         let _ = receipt_id;
-        return Err("Windows RunOnce is unavailable on this platform".to_string());
+        Err("Windows RunOnce is unavailable on this platform".to_string())
     }
 
     #[cfg(windows)]
