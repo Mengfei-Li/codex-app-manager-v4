@@ -252,6 +252,54 @@ fn successful_transaction_commits_three_files_vault_and_hash_manifest() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn successful_transaction_enforces_owner_only_unix_permissions() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let (_temp, paths, spec) = fixture();
+    fs::write(paths.codex_home.join("config.toml"), b"# existing\n").unwrap();
+    fs::write(paths.codex_home.join("auth.json"), b"{\"OLD\":true}\n").unwrap();
+    let mut vault = MemoryCredentialVault::default();
+    let request_secrets = secrets();
+    let report = provision_configuration(
+        ProvisioningRequest {
+            paths: &paths,
+            spec: &spec,
+            secrets: &request_secrets,
+            operation_id: Uuid::new_v4(),
+            installation_id: Uuid::new_v4(),
+            policy: ConflictPolicy::RejectUnmanaged,
+        },
+        &mut vault,
+        &mut NoFault,
+    )
+    .unwrap();
+
+    for path in [
+        paths.codex_home.join("config.toml"),
+        paths.codex_home.join("auth.json"),
+        spec.model_catalog_path.clone(),
+        PathBuf::from(&report.backup_directory).join("transaction.json"),
+    ] {
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "{} must be owner-readable and owner-writable only",
+            path.display()
+        );
+    }
+    assert_eq!(
+        fs::metadata(&report.backup_directory)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700,
+        "backup directory must be owner-accessible only"
+    );
+}
+
 struct FailAt {
     checkpoint: String,
 }
