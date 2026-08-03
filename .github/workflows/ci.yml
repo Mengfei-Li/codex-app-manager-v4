@@ -64,7 +64,7 @@ jobs:
       - name: Build frontend (for tauri-build)
         run: npm run build
       - name: Clippy (deny warnings)
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml --workspace --all-targets -- -D warnings
+        run: node scripts/run-clippy-annotated.mjs
       - name: Test (src-tauri)
         run: cargo test --manifest-path src-tauri/Cargo.toml --workspace
       # Path deps are not workspace members, so their unit/integration tests are
