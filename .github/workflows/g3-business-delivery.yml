@@ -1,0 +1,157 @@
+name: G3 business delivery
+
+# G3 proves the customer claim, device binding, configuration transaction,
+# locale isolation and end-to-end verifier on all four native targets. The
+# PostgreSQL job executes the actual Portal V4 migration under concurrency.
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/v4-main]
+  pull_request:
+    paths:
+      - "assets/models-full-responses.json"
+      - "crates/codex-delivery-engine/**"
+      - "src-tauri/resources/i18n-relay-worker.ps1"
+      - "src-tauri/src/delivery.rs"
+      - "tests/g3/**"
+      - "scripts/g3-write-evidence.mjs"
+      - ".github/workflows/g3-business-delivery.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: g3-business-delivery-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-delivery:
+    name: ${{ matrix.name }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            runner: windows-2025
+            target: x86_64-pc-windows-msvc
+          - name: windows-arm64
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+          - name: macos-arm64
+            runner: macos-15
+            target: aarch64-apple-darwin
+          - name: macos-x64
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: 24.16.0
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4  # stable
+        with:
+          toolchain: 1.97.1
+          targets: ${{ matrix.target }}
+          components: clippy
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
+        with:
+          workspaces: |
+            src-tauri -> target
+            crates/codex-delivery-engine -> target
+
+      - name: Install locked frontend dependencies
+        run: npm ci
+
+      - name: Delivery engine full suite
+        run: cargo test --manifest-path crates/codex-delivery-engine/Cargo.toml --all-targets -- --test-threads=1
+
+      - name: Delivery engine zero-warning lint
+        run: cargo clippy --manifest-path crates/codex-delivery-engine/Cargo.toml --all-targets -- -D warnings
+
+      - name: Manager HTTP claim adapter
+        run: cargo test --manifest-path src-tauri/Cargo.toml delivery::tests --lib -- --test-threads=1
+
+      - name: Native target compile
+        run: cargo build --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }}
+
+      - name: Write immutable G3 evidence summary
+        env:
+          G3_NAME: ${{ matrix.name }}
+          G3_RUNNER: ${{ matrix.runner }}
+          G3_TARGET: ${{ matrix.target }}
+          G3_SHA: ${{ github.sha }}
+          G3_RUN_ID: ${{ github.run_id }}
+        run: node scripts/g3-write-evidence.mjs
+
+      - name: Upload G3 platform evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        with:
+          name: g3-delivery-${{ matrix.name }}
+          path: artifacts/g3/${{ matrix.name }}.json
+          if-no-files-found: error
+          retention-days: 30
+
+  postgres-claim-contract:
+    name: PostgreSQL claim state machine
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17.5-bookworm
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: v4g3
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d v4g3"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Isolated Python environment
+        run: |
+          python3 -m venv .venv-g3
+          .venv-g3/bin/python -m pip install --disable-pip-version-check psycopg[binary]==3.2.9
+
+      - name: Execute real claim state and concurrency matrix
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/v4g3
+        run: |
+          mkdir -p artifacts/g3
+          .venv-g3/bin/python tests/g3/postgres/verify_claim_protocol.py > artifacts/g3/postgres-claim.json
+
+      - name: Validate evidence is secret-free JSON
+        run: |
+          .venv-g3/bin/python - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path("artifacts/g3/postgres-claim.json")
+          data = json.loads(path.read_text(encoding="utf-8"))
+          assert data["status"] == "passed"
+          assert data["state_matrix"] >= 12
+          assert data["concurrency_scenarios"] == 2
+          assert data["secrets_emitted"] is False
+          assert "sk-" not in path.read_text(encoding="utf-8")
+          PY
+
+      - name: Upload PostgreSQL claim evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        with:
+          name: g3-postgres-claim
+          path: artifacts/g3/postgres-claim.json
+          if-no-files-found: error
+          retention-days: 30

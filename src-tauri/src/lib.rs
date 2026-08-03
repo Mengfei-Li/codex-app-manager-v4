@@ -1,6 +1,7 @@
 pub mod adapters;
 pub mod app;
 pub mod commands;
+pub mod delivery;
 pub mod domain;
 pub mod errors;
 
