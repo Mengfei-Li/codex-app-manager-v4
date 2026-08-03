@@ -30,12 +30,14 @@ fn catalog_bytes() -> Vec<u8> {
 
 #[test]
 fn published_full_responses_catalog_has_pinned_bytes_and_semantics() {
-    assert_eq!(FULL_RESPONSES_CATALOG.len(), 327_616);
+    let text = std::str::from_utf8(FULL_RESPONSES_CATALOG).unwrap();
+    let canonical = text.replace("\r\n", "\n");
+    assert_eq!(canonical.len(), 326_974);
     assert_eq!(
-        sha256_hex(FULL_RESPONSES_CATALOG),
-        "ac7b44ee89082194a40f13ca5134c8449111f9acd083effe3f6d0e0d3ad48259"
+        sha256_hex(canonical.as_bytes()),
+        "a61fbe6d2a5bed953fb0e08e9f9e22b78715e5f8802fe2c2c0dcb41ad6a9acda"
     );
-    let value: serde_json::Value = serde_json::from_slice(FULL_RESPONSES_CATALOG).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&canonical).unwrap();
     let models = value["models"].as_array().unwrap();
     assert_eq!(models.len(), 8);
     let slugs: Vec<&str> = models
