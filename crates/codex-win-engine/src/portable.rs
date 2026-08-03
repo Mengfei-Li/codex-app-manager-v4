@@ -9,9 +9,10 @@ use serde::{Deserialize, Serialize};
 use crate::app_version::read_codex_app_version_from_install_root;
 use crate::msix::{parse_appx_manifest_xml, MsixIdentity};
 use crate::process::{
-    hidden_command, run_capturing, spawn_and_require_liveness, LivenessResult, RunLimits,
-    PORTABLE_LIVENESS_WINDOW,
+    hidden_command, spawn_and_require_liveness, LivenessResult, PORTABLE_LIVENESS_WINDOW,
 };
+#[cfg(windows)]
+use crate::process::{run_capturing, RunLimits};
 use crate::EngineError;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

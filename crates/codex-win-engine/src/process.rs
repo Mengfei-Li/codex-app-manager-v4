@@ -16,11 +16,14 @@ use std::time::{Duration, Instant};
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Default wall-clock budget for a short PowerShell / curl-text probe.
+#[cfg(windows)]
 pub const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_secs(45);
 /// Longer budget for Add-AppxPackage / Remove-AppxPackage.
+#[cfg(windows)]
 pub const INSTALL_TIMEOUT: Duration = Duration::from_secs(180);
 /// Upper bound for the one-shot UAC recovery used only when Windows Update owns
 /// an active deployment of the exact package we already downloaded locally.
+#[cfg(windows)]
 pub const APPX_RECOVERY_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// Default no-progress budget for streaming package downloads.
 pub const DEFAULT_STALL_TIMEOUT: Duration = Duration::from_secs(120);
@@ -31,10 +34,12 @@ pub const DEFAULT_DOWNLOAD_TOTAL_TIMEOUT: Duration = Duration::from_secs(2 * 60 
 pub const PORTABLE_LIVENESS_WINDOW: Duration = Duration::from_secs(3);
 /// Continuous survival required after MSIX shell activation — aligned with the
 /// portable liveness window so both routes reject the same class of crash-loops.
+#[cfg(windows)]
 pub const MSIX_LIVENESS_WINDOW_SECS: u64 = PORTABLE_LIVENESS_WINDOW.as_secs();
 /// Outer budget to wait for a cold-started MSIX process to *appear* after
 /// `Start-Process shell:AppsFolder\…`. Cold machines / AppX service warm-up can
 /// take well over 10s; too short a window causes false portable fallbacks.
+#[cfg(windows)]
 pub const MSIX_ACTIVATION_WINDOW_SECS: u64 = 30;
 
 /// Poll interval while waiting on a child.
@@ -60,14 +65,17 @@ impl RunLimits {
         }
     }
 
+    #[cfg(windows)]
     pub fn probe() -> Self {
         Self::total(DEFAULT_PROBE_TIMEOUT)
     }
 
+    #[cfg(windows)]
     pub fn install() -> Self {
         Self::total(INSTALL_TIMEOUT)
     }
 
+    #[cfg(windows)]
     pub fn appx_recovery() -> Self {
         Self::total(APPX_RECOVERY_TIMEOUT)
     }
@@ -146,6 +154,7 @@ pub(crate) fn curl_exe() -> PathBuf {
 
 /// Terminate a child and, on Windows, its process tree (PowerShell nests work).
 fn terminate_tree(child: &mut Child) {
+    #[cfg(windows)]
     let pid = child.id();
     let _ = child.kill();
     #[cfg(windows)]
@@ -178,6 +187,7 @@ pub fn run_capturing(
 }
 
 /// Capturing runner with child PID and one-second heartbeat callbacks.
+#[cfg(windows)]
 pub(crate) fn run_capturing_observed(
     command: Command,
     limits: RunLimits,
@@ -549,6 +559,7 @@ mod tests {
         assert_eq!(output.stderr.len(), BYTES);
     }
 
+    #[cfg(windows)]
     #[test]
     fn observed_runner_reports_pid_and_heartbeat() {
         let pid = std::sync::Mutex::new(None);

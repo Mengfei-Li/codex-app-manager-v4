@@ -46,7 +46,6 @@ fn ps_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
-#[cfg(any(windows, test))]
 fn normalized_dn_components(value: &str) -> Vec<String> {
     value
         .split(',')

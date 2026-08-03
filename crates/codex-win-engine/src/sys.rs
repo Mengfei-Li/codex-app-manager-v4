@@ -12,9 +12,13 @@ use crate::limits::MAX_TEXT_BYTES;
 use crate::msix::parse_appx_manifest_xml;
 use crate::network::{is_schannel_revocation_offline, NetworkConfig, SchannelRevocationCheck};
 use crate::process::{
-    curl_exe, hidden_command, run_capturing, run_capturing_observed, spawn_and_require_liveness,
-    LivenessResult, RunError, RunLimits, TimeoutKind, MSIX_ACTIVATION_WINDOW_SECS,
-    MSIX_LIVENESS_WINDOW_SECS, PORTABLE_LIVENESS_WINDOW,
+    curl_exe, hidden_command, run_capturing, spawn_and_require_liveness, LivenessResult, RunLimits,
+    PORTABLE_LIVENESS_WINDOW,
+};
+#[cfg(windows)]
+use crate::process::{
+    run_capturing_observed, RunError, TimeoutKind, MSIX_ACTIVATION_WINDOW_SECS,
+    MSIX_LIVENESS_WINDOW_SECS,
 };
 use crate::EngineError;
 
@@ -2482,6 +2486,7 @@ function Get-AppxPackage {
         assert_eq!(super::msix_failure::CLEANUP_FAILED, "cleanup-failed");
     }
 
+    #[cfg(windows)]
     #[test]
     fn msix_liveness_window_matches_portable() {
         assert_eq!(

@@ -101,7 +101,9 @@ fn push_schannel_no_revoke(_args: &mut Vec<String>) {}
 
 #[cfg(test)]
 mod tests {
-    use super::{is_schannel_revocation_offline, NetworkConfig, SchannelRevocationCheck};
+    #[cfg(windows)]
+    use super::SchannelRevocationCheck;
+    use super::{is_schannel_revocation_offline, NetworkConfig};
 
     #[test]
     fn direct_proxy_mode_disables_curl_proxy_resolution() {

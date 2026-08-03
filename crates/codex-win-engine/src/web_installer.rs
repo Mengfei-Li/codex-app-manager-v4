@@ -6,13 +6,19 @@
 //! exact Microsoft Corporation publisher subject.
 
 use std::path::Path;
+#[cfg(windows)]
 use std::process::Command;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::authenticode::{verify_microsoft_web_installer_authenticode, AuthenticodeReport};
-use crate::network::{NetworkConfig, SchannelRevocationCheck};
+#[cfg(windows)]
+use crate::authenticode::verify_microsoft_web_installer_authenticode;
+use crate::authenticode::AuthenticodeReport;
+use crate::network::NetworkConfig;
+#[cfg(windows)]
+use crate::network::SchannelRevocationCheck;
+#[cfg(windows)]
 use crate::process::{curl_exe, hidden_command, run_capturing, run_with_progress, RunLimits};
 use crate::EngineError;
 
@@ -41,9 +47,9 @@ pub fn download_and_verify_official_web_installer(
     #[cfg(not(windows))]
     {
         let _ = (destination, network, on_progress);
-        return Err(EngineError::Install(
+        Err(EngineError::Install(
             "official Web Installer is only available on Windows".to_string(),
-        ));
+        ))
     }
 
     #[cfg(windows)]
@@ -123,9 +129,9 @@ pub fn execute_official_web_installer(
     #[cfg(not(windows))]
     {
         let _ = installer;
-        return Err(EngineError::Install(
+        Err(EngineError::Install(
             "official Web Installer is only available on Windows".to_string(),
-        ));
+        ))
     }
 
     #[cfg(windows)]
