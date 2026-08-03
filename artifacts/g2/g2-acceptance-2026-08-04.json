@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "gate": "G2",
+  "decision": "pass",
+  "accepted_at": "2026-08-04T01:53:17+08:00",
+  "repository": "Mengfei-Li/codex-app-manager-v4",
+  "branch": "codex/v4-main",
+  "commit": "ee7067785b5be8640a9f017b680a2e49ddcf08e4",
+  "production_changed": false,
+  "required_checks": 12,
+  "successful_checks": 12,
+  "failed_checks": 0,
+  "runs": [
+    {"id": 30837523890, "name": "CI", "conclusion": "success"},
+    {"id": 30837523955, "name": "macOS packaged smoke", "conclusion": "success"},
+    {"id": 30837523897, "name": "Windows installer check", "conclusion": "success"},
+    {"id": 30837523899, "name": "G2 platform kernel", "conclusion": "success"}
+  ],
+  "jobs": [
+    {"id": 91766242728, "run_id": 30837523890, "name": "Frontend", "conclusion": "success"},
+    {"id": 91766242734, "run_id": 30837523890, "name": "Blocking dependency audit", "conclusion": "success"},
+    {"id": 91766242740, "run_id": 30837523890, "name": "Cloudflare worker tests", "conclusion": "success"},
+    {"id": 91766242800, "run_id": 30837523890, "name": "Rust (windows-2025)", "conclusion": "success"},
+    {"id": 91766242819, "run_id": 30837523890, "name": "Rust (macos-15)", "conclusion": "success"},
+    {"id": 91766352132, "run_id": 30837523955, "name": "arm64 / Simplified Chinese", "conclusion": "success"},
+    {"id": 91766352649, "run_id": 30837523955, "name": "x64 / English", "conclusion": "success"},
+    {"id": 91766302583, "run_id": 30837523897, "name": "nsis", "conclusion": "success"},
+    {"id": 91766327088, "run_id": 30837523899, "name": "windows-x64", "conclusion": "success"},
+    {"id": 91766327220, "run_id": 30837523899, "name": "windows-arm64", "conclusion": "success"},
+    {"id": 91766327193, "run_id": 30837523899, "name": "macos-arm64", "conclusion": "success"},
+    {"id": 91766327117, "run_id": 30837523899, "name": "macos-x64", "conclusion": "success"}
+  ],
+  "artifacts": [
+    {"id": 8865708359, "run_id": 30837523897, "name": "nsis-installer", "size_in_bytes": 4458600, "digest": "sha256:e256644ea49cb95c67342e549d3984d1e13caaf0e5a7785bd12643ece468548b"},
+    {"id": 8865779572, "run_id": 30837523955, "name": "macos-smoke-logs-x86_64-apple-darwin", "size_in_bytes": 1004, "digest": "sha256:f3a003117d374ad6cf84aad33b17343d7073e79d5dc05b65b189bc7f6084a755"},
+    {"id": 8865527577, "run_id": 30837523955, "name": "macos-smoke-logs-aarch64-apple-darwin", "size_in_bytes": 1011, "digest": "sha256:bf51db1b72f85306b15b27f6a943094346b66f14381edf42b6ef7bf83a9cf1f8"},
+    {"id": 8865716150, "run_id": 30837523899, "name": "g2-platform-windows-x64", "size_in_bytes": 444, "digest": "sha256:d742c778b0ec589c0561c38f3bb1ff6508a1051eb516f8b64864da5f0b9eb2ea"},
+    {"id": 8865782122, "run_id": 30837523899, "name": "g2-platform-windows-arm64", "size_in_bytes": 449, "digest": "sha256:21a09a05f44e5cac78b2d187f8dff791ccc0ee12e43d46a64604a8656b1f76f2"},
+    {"id": 8865601004, "run_id": 30837523899, "name": "g2-platform-macos-arm64", "size_in_bytes": 446, "digest": "sha256:e9561c173681bb7127f3f163cb39ea6c4c8078fecdea8a1a29cab2b624b6f694"},
+    {"id": 8865843127, "run_id": 30837523899, "name": "g2-platform-macos-x64", "size_in_bytes": 446, "digest": "sha256:c898b04e7e677ff20d2509de518d24d30056b1d919bee3d98bd3e3f083a1ea3b"}
+  ],
+  "local_regression": {
+    "windows_engine": {"passed": 100, "failed": 0},
+    "macos_engine": {"passed": 20, "failed": 0},
+    "manager_workspace": {"passed": 126, "failed": 0},
+    "frontend": {"passed": 282, "failed": 0},
+    "npm_audit_vulnerabilities": 0,
+    "clippy_warnings": 0
+  },
+  "scope_note": "Unsigned CI/platform simulation evidence only. Real publisher signing, notarization, Gatekeeper, and four-device acceptance remain blocking G6 requirements."
+}
+
