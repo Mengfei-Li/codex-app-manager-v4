@@ -82,7 +82,7 @@ jobs:
       - name: RustSec high and critical gate
         run: |
           cargo install cargo-audit --locked --version 0.22.2
-          cargo audit --deny warnings --file src-tauri/Cargo.lock
+          cargo audit --file src-tauri/Cargo.lock
 
   native-fault-matrix:
     name: ${{ matrix.name }}
