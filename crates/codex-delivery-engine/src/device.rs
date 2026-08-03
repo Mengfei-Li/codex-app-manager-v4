@@ -60,7 +60,7 @@ pub fn native_device_hash() -> Result<String, DeliveryError> {
     let end = tail
         .find('"')
         .ok_or_else(|| DeliveryError::InvalidClaim("device-id-invalid".to_string()))?;
-    fingerprint_hash("macos-io-platform-uuid", tail[..end].as_bytes())
+    fingerprint_hash("macos-io-platform-uuid", &tail.as_bytes()[..end])
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
