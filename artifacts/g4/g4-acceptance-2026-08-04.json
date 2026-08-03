@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "gate": "G4",
+  "decision": "pass",
+  "accepted_at": "2026-08-04T06:34:30+08:00",
+  "repository": "Mengfei-Li/codex-app-manager-v4",
+  "branch": "codex/v4-main",
+  "commit": "37c433e1fa0d927e4257fbe4fac6297f415db5b6",
+  "production_changed": false,
+  "config_toml_changed": false,
+  "secret_values_recorded": false,
+  "run": {
+    "id": 30857426864,
+    "name": "G4 diagnostics and recovery",
+    "conclusion": "success"
+  },
+  "jobs": [
+    {"id": 91831575681, "name": "snapshot and support UI", "conclusion": "success"},
+    {"id": 91831575726, "name": "macos-x64", "conclusion": "success"},
+    {"id": 91831575741, "name": "macos-arm64", "conclusion": "success"},
+    {"id": 91831575767, "name": "windows-arm64", "conclusion": "success"},
+    {"id": 91831575768, "name": "windows-x64", "conclusion": "success"}
+  ],
+  "artifacts": [
+    {"id": 8873329642, "name": "g4-diagnostics-macos-x64", "size_in_bytes": 635, "digest": "sha256:20bac3c54a9b4c4beea8747703f40da67585d4acbc15528c2116d0aa242b6f7d"},
+    {"id": 8873249354, "name": "g4-diagnostics-windows-arm64", "size_in_bytes": 640, "digest": "sha256:8ef8ddf7c1adad77963c6cc634f2be7749db0360dd51ca2a72a40b1747c3ccdd"},
+    {"id": 8873236520, "name": "g4-diagnostics-windows-x64", "size_in_bytes": 637, "digest": "sha256:17560fb878adee30fab95c55317294d9903cc757411dd2de86564c82fc5cf36d"},
+    {"id": 8873140785, "name": "g4-diagnostics-macos-arm64", "size_in_bytes": 635, "digest": "sha256:aa1c12ac284607b3a38cd7f27ccf0b4435d12f3c4c4c20978dc957f180f677c6"}
+  ],
+  "local_regression": {
+    "frontend": {"passed": 285, "failed": 0},
+    "tauri": {"passed": 133, "failed": 0},
+    "diagnostics_engine": {"passed": 7, "failed": 0},
+    "typescript_check": "pass",
+    "eslint": "pass",
+    "tauri_clippy_warnings": 0,
+    "diagnostics_clippy_warnings": 0
+  },
+  "exit_conditions": {
+    "renderer_reload_restores_progress": true,
+    "known_failures_expose_stage_root_cause_and_next_action": true,
+    "child_worker_failure_bundle_contains_child_log": true,
+    "offline_upload_preserves_retransmittable_local_bundle": true
+  },
+  "scope_note": "G4 proves durable operation snapshots, complete local-first diagnostic bundles, retryable uploads, support-facing report state, and four-native-target compilation. Business-context population is intentionally wired and exercised in P5 before the production candidate is accepted."
+}
