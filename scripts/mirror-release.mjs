@@ -1555,6 +1555,39 @@ async function rollbackAuthoritativePromotion({
   return { failures, rolledBack: true };
 }
 
+export async function rollbackCompletedPromotion(context) {
+  if (!context || typeof context !== "object") {
+    throw new Error("completed promotion has no rollback context");
+  }
+  if (context.consumed) {
+    throw new Error("completed promotion rollback context was already consumed");
+  }
+  context.consumed = true;
+  const result = await rollbackAuthoritativePromotion({
+    r2State: context.r2State,
+    ihepState: context.ihepState,
+    r2Commit: context.r2Commit,
+    followerWriteAttempted: context.followerWriteAttempted,
+    candidatePath: context.candidatePath,
+    promotionToken: context.promotionToken,
+    summaryByName: context.summaryByName,
+    workDir: context.workDir,
+  });
+  context.summary.rollback = {
+    attempted: true,
+    complete: result.failures.length === 0 && result.rolledBack,
+    failures: result.failures,
+    reason: "post-promotion-g8-transaction-failure",
+  };
+  if (!context.summary.rollback.complete) {
+    throw new Error(
+      `completed mirror promotion rollback failed: ${result.failures.join("; ") || "unknown"}`,
+    );
+  }
+  context.summary.outcome = "rolled-back-after-promotion";
+  return result;
+}
+
 async function reconcileFollowerToCurrentAuthority({
   r2State,
   ihepState,
@@ -1957,7 +1990,22 @@ export async function promoteCandidateTransaction({
         "already-follows-r2";
     }
     summaryByName.get("ihep").finalVersion = finalFollowerCoverage.manifest.version;
-    return { outcome: override.used ? "downgrade-override-promoted" : "promoted", states };
+    return {
+      outcome: override.used ? "downgrade-override-promoted" : "promoted",
+      states,
+      rollbackContext: {
+        candidatePath,
+        consumed: false,
+        followerWriteAttempted,
+        ihepState,
+        promotionToken,
+        r2Commit,
+        r2State,
+        summary,
+        summaryByName,
+        workDir,
+      },
+    };
   } catch (error) {
     if (activeState) {
       summaryByName.get(activeState.backend.name).error = safeSummaryError(error);

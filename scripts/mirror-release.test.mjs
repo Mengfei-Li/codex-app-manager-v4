@@ -28,6 +28,7 @@ import {
   downgradeOverrideFromEnv,
   promoteCandidateTransaction,
   promoteMirrors,
+  rollbackCompletedPromotion,
   verifyBackendCandidate,
   verifyLocalUpdaterArtifacts,
   verifyMirrors,
@@ -1043,6 +1044,47 @@ describe("monotonic mirror promotion", () => {
     expect(result.outcome).toBe("idempotent");
     expect(backends.map((backend) => backend.latestPutAttempts)).toEqual([0, 0]);
     expect(backends.every((backend) => backend.body("latest.json").equals(original))).toBe(true);
+  });
+
+  it("can roll back a completed two-backend promotion after a later G8 failure", async () => {
+    const root = await tempRoot("completed-promotion-rollback");
+    const previous = manifest("1.9.0");
+    const candidate = manifest("2.0.0");
+    const candidatePath = await writeManifest(root, "candidate.json", candidate);
+    const initial = Buffer.from(`${JSON.stringify(previous)}\n`);
+    const backends = [
+      new MemoryBackend("r2", { "latest.json": initial }),
+      new MemoryBackend("ihep", { "latest.json": initial }),
+    ];
+    const summary = summaryFor(backends);
+
+    const result = await promoteCandidateTransaction({
+      backends,
+      candidateManifest: candidate,
+      candidatePath,
+      override: overrideOff(),
+      summary,
+      workDir: join(root, "transaction"),
+      promotionToken: "g8-completed-rollback-test",
+    });
+    expect(result.outcome).toBe("promoted");
+    expect(backends.map((backend) => JSON.parse(backend.body("latest.json")).version)).toEqual([
+      "2.0.0",
+      "2.0.0",
+    ]);
+
+    const rollback = await rollbackCompletedPromotion(result.rollbackContext);
+    expect(rollback.failures).toEqual([]);
+    expect(rollback.rolledBack).toBe(true);
+    expect(backends.map((backend) => JSON.parse(backend.body("latest.json")).version)).toEqual([
+      "1.9.0",
+      "1.9.0",
+    ]);
+    expect(summary.outcome).toBe("rolled-back-after-promotion");
+    expect(summary.rollback.complete).toBe(true);
+    await expect(rollbackCompletedPromotion(result.rollbackContext)).rejects.toThrow(
+      "already consumed",
+    );
   });
 
   it("rejects a concurrent latest change before returning idempotent", async () => {
