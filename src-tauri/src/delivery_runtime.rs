@@ -96,6 +96,13 @@ pub enum DeliveryRunOutcome {
     Delivered,
 }
 
+#[derive(Debug)]
+struct VerifiedSidecarCandidate {
+    path: PathBuf,
+    issued_at_unix: i64,
+    signature_b64: String,
+}
+
 pub struct BootstrapDiagnosticAuthorization {
     pub token: Zeroizing<String>,
     pub diagnostic_endpoint: Url,
@@ -156,12 +163,19 @@ pub fn run_after_platform_install<R: tauri::Runtime>(
         DeliveryRuntimeError::new("codex-home-unavailable", "delivery-prepare", false)
     })?;
     let existing_v4 = has_v4_managed_configuration(&codex_home);
-    if existing_v4 && !sidecar_candidates().iter().any(|path| path.is_file()) {
-        return Ok(DeliveryRunOutcome::ExistingConfiguration);
-    }
     let policy = release_policy(RELEASE_POLICY_JSON, false)?;
     let verification_policy = policy.verification_policy(None)?;
-    let sidecar_path = locate_signed_sidecar(&verification_policy, now_unix())?;
+    let sidecar_path = match locate_signed_sidecar(&verification_policy, now_unix()) {
+        Ok(path) => path,
+        Err(error) if existing_v4 => {
+            log::warn!(
+                "ignored invalid V4 bootstrap because managed configuration already exists code={}",
+                error.code
+            );
+            return Ok(DeliveryRunOutcome::ExistingConfiguration);
+        }
+        Err(error) => return Err(error),
+    };
     let Some(sidecar_path) = sidecar_path else {
         return if existing_v4 {
             Ok(DeliveryRunOutcome::ExistingConfiguration)
@@ -423,37 +437,84 @@ fn locate_signed_sidecar(
     policy: &VerificationPolicy,
     now: i64,
 ) -> Result<Option<PathBuf>, DeliveryRuntimeError> {
-    for path in sidecar_candidates() {
-        if !path.is_file() {
-            continue;
-        }
-        match load_bootstrap_sidecar(&path, policy, now) {
-            Ok(_) => return Ok(Some(path)),
-            Err(error) => {
-                log::warn!("rejected V4 bootstrap candidate code={}", error.code);
+    for tier in sidecar_candidate_tiers() {
+        let mut found_file = false;
+        let mut verified = Vec::new();
+        let mut rejected_code = None;
+        for path in tier {
+            if !path.is_file() {
+                continue;
             }
+            found_file = true;
+            match load_bootstrap_sidecar(&path, policy, now) {
+                Ok(loaded) => verified.push(VerifiedSidecarCandidate {
+                    path,
+                    issued_at_unix: loaded.envelope().payload.issued_at_unix,
+                    signature_b64: loaded.envelope().signature_b64.clone(),
+                }),
+                Err(error) => {
+                    log::warn!("rejected V4 bootstrap candidate code={}", error.code);
+                    rejected_code = Some(error.code);
+                }
+            }
+        }
+        if let Some(path) = select_latest_verified_sidecar(verified)? {
+            return Ok(Some(path));
+        }
+        if found_file {
+            return Err(DeliveryRuntimeError::new(
+                rejected_code
+                    .as_deref()
+                    .unwrap_or("bootstrap-sidecar-no-valid-candidate"),
+                "bootstrap",
+                false,
+            ));
         }
     }
     Ok(None)
 }
 
-fn sidecar_candidates() -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
+fn select_latest_verified_sidecar(
+    mut candidates: Vec<VerifiedSidecarCandidate>,
+) -> Result<Option<PathBuf>, DeliveryRuntimeError> {
+    let Some(latest_issued_at) = candidates.iter().map(|item| item.issued_at_unix).max() else {
+        return Ok(None);
+    };
+    candidates.retain(|item| item.issued_at_unix == latest_issued_at);
+    let signatures = candidates
+        .iter()
+        .map(|item| item.signature_b64.as_str())
+        .collect::<BTreeSet<_>>();
+    if signatures.len() != 1 {
+        return Err(DeliveryRuntimeError::new(
+            "bootstrap-sidecar-ambiguous",
+            "bootstrap",
+            false,
+        ));
+    }
+    candidates.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(candidates.into_iter().next().map(|item| item.path))
+}
+
+fn sidecar_candidate_tiers() -> Vec<Vec<PathBuf>> {
+    let mut colocated = Vec::new();
     if let Ok(executable) = std::env::current_exe() {
         for parent in executable.ancestors().take(6).filter_map(Path::parent) {
-            candidates.push(parent.join(BOOTSTRAP_FILE_NAME));
+            colocated.push(parent.join(BOOTSTRAP_FILE_NAME));
         }
     }
     if let Ok(current) = std::env::current_dir() {
-        candidates.push(current.join(BOOTSTRAP_FILE_NAME));
+        colocated.push(current.join(BOOTSTRAP_FILE_NAME));
     }
+    let mut managed = Vec::new();
     if let Some(root) = crate::app::paths::data_dir() {
-        candidates.push(root.join("bootstrap").join(BOOTSTRAP_FILE_NAME));
+        managed.push(root.join("bootstrap").join(BOOTSTRAP_FILE_NAME));
     }
+    let mut downloads = Vec::new();
     if let Some(users) = directories::UserDirs::new() {
-        if let Some(downloads) = users.download_dir() {
-            candidates.extend(find_named_files_bounded(
-                downloads,
+        if let Some(root) = users.download_dir() {
+            downloads.extend(find_named_files_bounded(
+                root,
                 BOOTSTRAP_FILE_NAME,
                 3,
                 MAX_SIDECAR_SEARCH_ENTRIES,
@@ -461,9 +522,14 @@ fn sidecar_candidates() -> Vec<PathBuf> {
         }
     }
     let mut seen = BTreeSet::new();
-    candidates
+    [colocated, managed, downloads]
         .into_iter()
-        .filter(|path| seen.insert(path.clone()))
+        .map(|tier| {
+            tier.into_iter()
+                .filter(|path| seen.insert(path.clone()))
+                .collect::<Vec<_>>()
+        })
+        .filter(|tier| !tier.is_empty())
         .collect()
 }
 
@@ -1531,6 +1597,48 @@ mod tests {
         let found = find_named_files_bounded(&root, BOOTSTRAP_FILE_NAME, 2, 100);
         assert_eq!(found, vec![accepted]);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    fn verified_candidate(
+        path: &str,
+        issued_at_unix: i64,
+        signature: &str,
+    ) -> VerifiedSidecarCandidate {
+        VerifiedSidecarCandidate {
+            path: PathBuf::from(path),
+            issued_at_unix,
+            signature_b64: signature.to_string(),
+        }
+    }
+
+    #[test]
+    fn signed_sidecar_selection_uses_newest_envelope_not_filesystem_order() {
+        let selected = select_latest_verified_sidecar(vec![
+            verified_candidate("z/old/bootstrap.v4.json", 100, "old-signature"),
+            verified_candidate("a/new/bootstrap.v4.json", 200, "new-signature"),
+        ])
+        .unwrap();
+        assert_eq!(selected, Some(PathBuf::from("a/new/bootstrap.v4.json")));
+    }
+
+    #[test]
+    fn signed_sidecar_selection_is_deterministic_for_identical_duplicates() {
+        let selected = select_latest_verified_sidecar(vec![
+            verified_candidate("z/bootstrap.v4.json", 200, "same-signature"),
+            verified_candidate("a/bootstrap.v4.json", 200, "same-signature"),
+        ])
+        .unwrap();
+        assert_eq!(selected, Some(PathBuf::from("a/bootstrap.v4.json")));
+    }
+
+    #[test]
+    fn signed_sidecar_selection_rejects_same_time_customer_ambiguity() {
+        let error = select_latest_verified_sidecar(vec![
+            verified_candidate("a/bootstrap.v4.json", 200, "customer-a-signature"),
+            verified_candidate("b/bootstrap.v4.json", 200, "customer-b-signature"),
+        ])
+        .unwrap_err();
+        assert_eq!(error.code, "bootstrap-sidecar-ambiguous");
     }
 
     #[test]
