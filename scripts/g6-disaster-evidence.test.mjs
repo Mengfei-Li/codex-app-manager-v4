@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { REQUIRED_DISASTER_CASES, validateDisasterEvidence } from "./g6-disaster-evidence.mjs";
+import {
+  DISASTER_CASE_COVERAGE,
+  REQUIRED_DISASTER_CASES,
+  validateDisasterEvidence,
+} from "./g6-disaster-evidence.mjs";
 
 const tag = "v4.0.0-rc.1";
 const commit = "a".repeat(40);
@@ -17,9 +21,15 @@ function fixture() {
     production_side_effects: false,
     skipped_required_tests: 0,
     cases: [...REQUIRED_DISASTER_CASES],
+    source_coverage: REQUIRED_DISASTER_CASES.map((name) => ({
+      case: name,
+      ...DISASTER_CASE_COVERAGE[name],
+      source_sha256: "b".repeat(64),
+    })),
     rollback: {
-      target_rto_seconds: 300,
-      maximum_rto_seconds: 30,
+      target_rto_seconds: 900,
+      observed_drill_seconds: 30,
+      measurement_scope: "complete-isolated-release-and-recovery-fault-suites",
       known_good_restored: true,
       mixed_version_observed: false,
     },
@@ -44,5 +54,15 @@ describe("G6 disaster evidence", () => {
     const evidence = fixture();
     evidence.production_side_effects = true;
     expect(() => validateDisasterEvidence(evidence, tag, commit, run)).toThrow("changed production");
+  });
+
+  it("rejects fabricated timing and unbound source coverage", () => {
+    const noTiming = fixture();
+    noTiming.rollback.observed_drill_seconds = 0;
+    expect(() => validateDisasterEvidence(noTiming, tag, commit, run)).toThrow("duration");
+
+    const stale = fixture();
+    stale.source_coverage[0].marker = "invented-test-marker";
+    expect(() => validateDisasterEvidence(stale, tag, commit, run)).toThrow("marker mismatch");
   });
 });

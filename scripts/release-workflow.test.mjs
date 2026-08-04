@@ -924,6 +924,19 @@ describe("release workflow recovery invariants", () => {
     const disaster = workflow.slice(disasterStart, selectStart);
     expect(disaster).toContain("npm run test:release");
     expect(disaster).toContain("cargo test --manifest-path src-tauri/Cargo.toml --lib");
+    for (const crate of [
+      "codex-win-engine",
+      "codex-mac-engine",
+      "codex-delivery-engine",
+      "codex-diagnostics-engine",
+    ]) {
+      expect(disaster).toContain(
+        `cargo test --manifest-path crates/${crate}/Cargo.toml --all-targets`,
+      );
+    }
+    expect(disaster).toContain('id: disaster_tests');
+    expect(disaster).toContain('elapsed_seconds="$(( $(date +%s) - started_at ))"');
+    expect(disaster).toContain("steps.disaster_tests.outputs.elapsed_seconds");
     expect(disaster).toContain("g6-disaster-evidence.mjs write");
 
     const selectEnd = workflow.indexOf("  release:\n");
@@ -942,5 +955,6 @@ describe("release workflow recovery invariants", () => {
     expect(releaseJob.slice(validate, finalValidation)).toContain(
       "g6-disaster-evidence.mjs verify",
     );
+    expect(releaseJob.slice(validate, finalValidation)).toContain('"release-source"');
   });
 });

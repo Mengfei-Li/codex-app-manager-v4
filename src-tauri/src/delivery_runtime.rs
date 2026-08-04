@@ -1655,6 +1655,39 @@ mod tests {
     }
 
     #[test]
+    fn loopback_api_outage_is_retryable_and_never_claims_success() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = vec![0_u8; 64 * 1024];
+            let read = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..read]).to_ascii_lowercase();
+            assert!(request.contains("authorization: bearer test-api-key"));
+            let body = r#"{"error":{"message":"temporarily unavailable"}}"#;
+            let response = format!(
+                "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        let root =
+            std::env::temp_dir().join(format!("codex-v4-api-outage-{}", Uuid::new_v4().simple()));
+        fs::create_dir_all(&root).unwrap();
+        let mut probe =
+            ProductionVerificationProbe::loopback_for_test(root.clone(), "test-api-key").unwrap();
+        let request = verification_request(format!("http://{address}/v1"));
+        let error = probe.models(&request).unwrap_err();
+        assert_eq!(error.code, "verification-models-http-503");
+        assert!(error.retryable);
+        server.join().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     #[allow(clippy::result_large_err)]
     fn loopback_websocket_verifier_uses_authorization_and_v2_feature_signal() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();

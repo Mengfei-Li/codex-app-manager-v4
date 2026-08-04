@@ -451,6 +451,19 @@ describe("Tauri updater verification", () => {
     ).rejects.toThrow("artifact signature is invalid");
   });
 
+  it("rejects an artifact after its signing key is revoked from the trust root", async () => {
+    const root = await tempRoot("revoked-updater-key");
+    const artifact = Buffer.from("signed updater bytes");
+    const original = updaterFixture(artifact);
+    const replacementTrustRoot = updaterFixture(artifact);
+    const path = join(root, "artifact.bin");
+    await writeFile(path, artifact);
+
+    await expect(
+      verifyTauriUpdaterSignature(path, original.signature, replacementTrustRoot.publicKey),
+    ).rejects.toThrow("artifact signature is invalid");
+  });
+
   it("verifies local manifest payloads and sidecars before publication", async () => {
     const root = await tempRoot("local-updater-signatures");
     const artifact = Buffer.from("locally signed updater bytes");
@@ -1523,6 +1536,33 @@ describe("monotonic mirror promotion", () => {
 
     expect(backends.map((backend) => backend.latestPutAttempts)).toEqual([0, 0]);
     expect(ihep.body("latest.json")).toBeUndefined();
+  });
+
+  it("fails closed before any write when the primary backend is unavailable", async () => {
+    const root = await tempRoot("primary-backend-outage");
+    const candidate = manifest("1.1.0");
+    const candidatePath = await writeManifest(root, "candidate.json", candidate);
+    const initial = Buffer.from(`${JSON.stringify(manifest("1.0.0"))}\n`);
+    const r2 = new MemoryBackend("r2", { "latest.json": initial });
+    const ihep = new MemoryBackend("ihep", { "latest.json": initial });
+    r2.snapshot = async () => {
+      throw new Error("r2: simulated primary backend outage");
+    };
+    const backends = [r2, ihep];
+
+    await expect(
+      promoteCandidateTransaction({
+        backends,
+        candidateManifest: candidate,
+        candidatePath,
+        override: overrideOff(),
+        summary: summaryFor(backends),
+        workDir: join(root, "transaction"),
+      }),
+    ).rejects.toThrow("simulated primary backend outage");
+
+    expect(backends.map((backend) => backend.latestPutAttempts)).toEqual([0, 0]);
+    expect(ihep.body("latest.json").equals(initial)).toBe(true);
   });
 
   it("CAS-rolls R2 back and preserves IHEP when the follower fails before writing", async () => {
