@@ -255,7 +255,9 @@ describe("release workflow recovery invariants", () => {
       );
       expect(prepare).toContain("check-release-source-ancestor.sh");
       expect(build).toContain("check-release-source-ancestor.sh");
-      expect(releaseJob.match(/check-release-source-ancestor\.sh/g).length).toBeGreaterThanOrEqual(4);
+      // Release builds still fence source ancestry before building, staging,
+      // and immutable publication. G8 owns the separate production promotion.
+      expect(releaseJob.match(/check-release-source-ancestor\.sh/g).length).toBe(3);
     } finally {
       await rm(root, { force: true, recursive: true });
     }
@@ -750,7 +752,6 @@ describe("release workflow recovery invariants", () => {
     const publishedVerify = releaseJob.indexOf(
       "- name: Verify published immutable Release and asset digests",
     );
-    const promote = releaseJob.indexOf("- name: Promote CDN mirror latest");
     const winget = releaseJob.indexOf("- name: Trigger winget submission");
     const summary = releaseJob.indexOf("- name: Write release summary");
     expect(localVerify).toBeGreaterThan(-1);
@@ -763,15 +764,14 @@ describe("release workflow recovery invariants", () => {
     expect(upload).toBeGreaterThan(-1);
     expect(publish).toBeGreaterThan(upload);
     expect(publishedVerify).toBeGreaterThan(publish);
-    expect(promote).toBeGreaterThan(publishedVerify);
+    expect(winget).toBeGreaterThan(publishedVerify);
 
     const uploadStep = releaseJob.slice(upload, publish);
     const publishStep = releaseJob.slice(publish, publishedVerify);
-    const verifyStep = releaseJob.slice(publishedVerify, promote);
+    const verifyStep = releaseJob.slice(publishedVerify, winget);
     const attestStep = releaseJob.slice(attest, verifyExisting);
     const existingStep = releaseJob.slice(verifyExisting, provenance);
     const provenanceStep = releaseJob.slice(provenance, stage);
-    const promoteStep = releaseJob.slice(promote, winget);
     const wingetStep = releaseJob.slice(winget, summary);
     const localVerifyStep = releaseJob.slice(localVerify, stage);
     const mirrorVerifyStep = releaseJob.slice(mirrorVerify, upload);
@@ -828,8 +828,9 @@ describe("release workflow recovery invariants", () => {
     );
     expect(attestStep).toContain("release-binding.mjs attestation");
     expect(provenanceStep).toContain('echo "ready=true" >> "$GITHUB_OUTPUT"');
-    expect(promoteStep).toContain("steps.provenance.outputs.ready == 'true'");
-    expect(promoteStep).not.toContain("steps.attest_fresh.outcome");
+    expect(releaseJob).not.toContain("- name: Promote CDN mirror latest");
+    expect(releaseJob).not.toContain("MIRROR_PHASE: promote");
+    expect(releaseJob).toContain("MIRROR_PROMOTE_OUTCOME: deferred-to-g8");
     expect(wingetStep).toContain("steps.provenance.outputs.ready == 'true'");
     expect(wingetStep).not.toContain("steps.attest_fresh.outcome");
     expect(releaseJob.slice(0, upload)).toContain(

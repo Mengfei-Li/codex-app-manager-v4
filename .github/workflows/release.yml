@@ -1568,41 +1568,9 @@ jobs:
             echo "Verified published attested digest: $name"
           done
 
-      # Existing immutable releases skip draft publication, so fence the final
-      # credentialed mirror promotion for both fresh and recovery paths.
-      - name: Re-check protected release source before final promotion
-        if: ${{ success() && steps.provenance.outputs.ready == 'true' && !contains(env.RELEASE_TAG, '-') }}
-        env:
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          GH_TOKEN: ${{ secrets.IMMUTABLE_RELEASES_READ_TOKEN }}
-        run: |
-          bash scripts/check-release-source-ancestor.sh release-source "$RELEASE_SOURCE_SHA" "$DEFAULT_BRANCH"
-          node scripts/check-release-tag-protection.mjs "$RELEASE_TAG" "$RELEASE_SOURCE_SHA"
-
-      - name: Promote CDN mirror latest (R2 + IHEP S3)
-        id: mirror_promote
-        if: ${{ success() && steps.provenance.outputs.ready == 'true' && !contains(env.RELEASE_TAG, '-') }}
-        env:
-          MIRROR_PHASE: promote
-          MIRROR_REQUIRED_BACKENDS: r2,ihep
-          MIRROR_CANDIDATE_ID: ${{ github.run_id }}-${{ github.run_attempt }}
-          MIRROR_ALLOW_DOWNGRADE: ${{ inputs.allow_mirror_downgrade && '1' || '0' }}
-          MIRROR_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          MIRROR_DOWNGRADE_REASON: ${{ inputs.mirror_downgrade_reason || '' }}
-          MIRROR_WORKFLOW_REF_NAME: ${{ github.ref_name }}
-          MANAGER_R2_S3_ENDPOINT: ${{ secrets.MANAGER_R2_S3_ENDPOINT }}
-          MANAGER_R2_BUCKET: ${{ vars.MANAGER_R2_BUCKET }}
-          MANAGER_R2_ACCESS_KEY_ID: ${{ secrets.MANAGER_R2_PROMOTION_ACCESS_KEY_ID }}
-          MANAGER_R2_SECRET_ACCESS_KEY: ${{ secrets.MANAGER_R2_PROMOTION_SECRET_ACCESS_KEY }}
-          MANAGER_IHEP_S3_ENDPOINT: ${{ vars.MANAGER_IHEP_S3_ENDPOINT }}
-          MANAGER_IHEP_S3_BUCKET: ${{ vars.MANAGER_IHEP_S3_BUCKET }}
-          MANAGER_IHEP_S3_REGION: ${{ vars.MANAGER_IHEP_S3_REGION }}
-          MANAGER_IHEP_S3_PREFIX: ${{ vars.MANAGER_IHEP_S3_PREFIX }}
-          MANAGER_IHEP_S3_ACCESS_KEY_ID: ${{ secrets.MANAGER_IHEP_S3_PROMOTION_ACCESS_KEY_ID }}
-          MANAGER_IHEP_S3_SECRET_ACCESS_KEY: ${{ secrets.MANAGER_IHEP_S3_PROMOTION_SECRET_ACCESS_KEY }}
-        run: |
-          [ -f dist/latest.json ] || cp latest.json dist/latest.json
-          bash scripts/sync-mirror.sh dist
+      # A stable release is immutable and fully staged here, but latest.json is
+      # intentionally not promoted. G8 owns the single transaction that changes
+      # both the mirror stable pointer and the portal's Win/Mac default mapping.
 
       # The release above is created with GITHUB_TOKEN, which by design does not
       # trigger other workflows — so winget.yml's `on: release` never fires.
@@ -1628,7 +1596,7 @@ jobs:
           PUBLISH_OUTCOME: ${{ steps.release_source.outputs.existing == 'true' && 'reused' || steps.publish_release.outcome }}
           MIRROR_STAGE_OUTCOME: ${{ steps.mirror_stage.outcome }}
           MIRROR_VERIFY_OUTCOME: ${{ steps.mirror_verify.outcome }}
-          MIRROR_PROMOTE_OUTCOME: ${{ steps.mirror_promote.outcome }}
+          MIRROR_PROMOTE_OUTCOME: deferred-to-g8
           WINGET_OUTCOME: ${{ steps.winget.outputs.status || steps.winget.outcome }}
           SBOM_OUTCOME: ${{ steps.sbom.outcome }}
           ATTESTATION_OUTCOME: ${{ steps.attest_fresh.outcome }}
