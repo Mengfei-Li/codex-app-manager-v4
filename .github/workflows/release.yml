@@ -609,6 +609,9 @@ jobs:
             for f in "$B"/macos/*.app.tar.gz;      do cp "$f" "$DST/CodexAppManager_${ARCH}.app.tar.gz"; done
             for f in "$B"/macos/*.app.tar.gz.sig;  do cp "$f" "$DST/CodexAppManager_${ARCH}.app.tar.gz.sig"; done
             for f in "$B"/dmg/*.dmg;               do cp "$f" "$DST/CodexAppManager_${ARCH}.dmg"; done
+            dmg=("$DST/CodexAppManager_${ARCH}.dmg")
+            [ -f "${dmg[0]}" ] || { echo "::error::[build] portal ZIP source DMG is missing" >&2; exit 1; }
+            ditto -c -k --keepParent "${dmg[0]}" "$DST/CodexAppManager_portal_macos_${ARCH}.zip"
           else
             # Strip spaces from the NSIS filenames (productName is "Codex App
             # Manager"). GitHub rewrites spaces to dots in uploaded asset names,
@@ -620,6 +623,9 @@ jobs:
                      "$B"/nsis/*.nsis.zip "$B"/nsis/*.nsis.zip.sig; do
               n="$(basename "$f")"; cp "$f" "$DST/${n// /}"
             done
+            setup=("$DST"/*-setup.exe)
+            [ "${#setup[@]}" -eq 1 ] || { echo "::error::[build] portal ZIP requires one setup EXE" >&2; exit 1; }
+            (cd "$DST" && 7z a -bd -y "CodexAppManager_portal_windows_${ARCH}.zip" "$(basename "${setup[0]}")" >/dev/null)
           fi
           ls -la "$DST"
           # Gate on final publishable names (not intermediate target/ paths).
@@ -1130,6 +1136,10 @@ jobs:
           require "CodexAppManager_x86_64.app.tar.gz"
           require "CodexAppManager_aarch64.app.tar.gz.sig"
           require "CodexAppManager_x86_64.app.tar.gz.sig"
+          require "CodexAppManager_portal_macos_aarch64.zip"
+          require "CodexAppManager_portal_macos_x86_64.zip"
+          require "CodexAppManager_portal_windows_aarch64.zip"
+          require "CodexAppManager_portal_windows_x86_64.zip"
           # Windows NSIS names after space-stripping (see Collect artifacts).
           require "*x64*-setup.exe"
           require "*arm64*-setup.exe"

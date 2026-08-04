@@ -397,7 +397,9 @@ describe("existing GitHub Release reuse", () => {
     const releaseTag = "v1.2.3";
     const valid = inspectReleaseForReuse(completeRelease(releaseTag), releaseTag);
     expect(valid.reusable).toBe(true);
-    expect(Object.keys(valid.digests)).toHaveLength(12);
+    expect(Object.keys(valid.digests)).toHaveLength(
+      requiredReleaseAssetNames(releaseTag).length,
+    );
 
     expect(() =>
       inspectReleaseForReuse(completeRelease(releaseTag, { immutable: false }), releaseTag),

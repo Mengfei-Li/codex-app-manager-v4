@@ -2183,7 +2183,7 @@ export async function verifyMirrors({
   }
 }
 
-export async function promoteMirrors({
+export async function promoteMirrorsTransaction({
   backends,
   candidateKey,
   candidateManifest,
@@ -2227,7 +2227,11 @@ export async function promoteMirrors({
       promotionToken,
     });
     await finishSummary(summaryPath, summary, transaction.outcome);
-    return summary;
+    return {
+      outcome: transaction.outcome,
+      rollbackContext: transaction.rollbackContext || null,
+      summary,
+    };
   } catch (error) {
     const outcome =
       error instanceof DowngradeBlockedError
@@ -2238,6 +2242,11 @@ export async function promoteMirrors({
     await finishSummary(summaryPath, summary, outcome, error);
     throw error;
   }
+}
+
+export async function promoteMirrors(options) {
+  const transaction = await promoteMirrorsTransaction(options);
+  return transaction.summary;
 }
 
 async function createAwsConfig(tempRoot) {

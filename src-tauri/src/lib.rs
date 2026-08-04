@@ -6,6 +6,7 @@ mod delivery_runtime;
 pub mod domain;
 pub mod errors;
 
+mod g7_native_e2e;
 mod state;
 mod v4_diagnostics;
 
@@ -816,7 +817,6 @@ pub fn run() {
                 });
             }
             let operations = app.state::<state::ManagerState>().operations.clone();
-            #[cfg(target_os = "windows")]
             let recovery_app = app.handle().clone();
             tauri::async_runtime::spawn_blocking(move || {
                 #[cfg(target_os = "windows")]
@@ -960,6 +960,7 @@ pub fn run() {
                         summary.failed
                     );
                 }
+                crate::g7_native_e2e::spawn_if_requested(recovery_app);
             });
             let health = app
                 .state::<state::ManagerState>()

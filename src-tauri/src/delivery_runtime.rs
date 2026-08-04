@@ -52,6 +52,10 @@ const NETWORK_TIMEOUT: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const WEBSOCKET_EVENT_LIMIT: usize = 2_000;
 
+pub fn embedded_release_build_id() -> Result<String, DeliveryRuntimeError> {
+    release_policy(RELEASE_POLICY_JSON, false).map(|policy| policy.build_id)
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReleasePolicy {
