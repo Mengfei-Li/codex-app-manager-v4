@@ -9,7 +9,7 @@
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::{BufRead, BufReader, Read as _};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -38,6 +38,8 @@ use url::Url;
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::app::settings_store::{AppSettings, ProxyMode};
+use crate::app::url_guard::validate_custom_proxy;
 use crate::delivery::{load_bootstrap_sidecar, HttpClaimTransport};
 use crate::v4_diagnostics::{persist_business_context, DiagnosticBusinessContext};
 
@@ -572,8 +574,60 @@ fn has_v4_managed_configuration(codex_home: &Path) -> bool {
     })
 }
 
+#[derive(Debug, Clone)]
+enum VerificationProxy {
+    System,
+    Direct,
+    Custom(Url),
+}
+
+impl VerificationProxy {
+    fn from_settings() -> Result<Self, DeliveryRuntimeError> {
+        let settings = AppSettings::load();
+        match settings.proxy_mode {
+            ProxyMode::System => Ok(Self::System),
+            ProxyMode::Direct => Ok(Self::Direct),
+            ProxyMode::Custom => {
+                let normalized =
+                    validate_custom_proxy(&settings.custom_proxy_url).map_err(|_| {
+                        DeliveryRuntimeError::new(
+                            "verification-proxy-invalid",
+                            "verification",
+                            false,
+                        )
+                    })?;
+                let url = Url::parse(&normalized).map_err(|_| {
+                    DeliveryRuntimeError::new("verification-proxy-invalid", "verification", false)
+                })?;
+                Ok(Self::Custom(url))
+            }
+        }
+    }
+
+    fn build_http_client(&self) -> Result<Client, DeliveryRuntimeError> {
+        let mut builder = Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(NETWORK_TIMEOUT)
+            .redirect(RedirectPolicy::none());
+        match self {
+            Self::System => {}
+            Self::Direct => builder = builder.no_proxy(),
+            Self::Custom(url) => {
+                let proxy = reqwest::Proxy::all(url.as_str()).map_err(|_| {
+                    DeliveryRuntimeError::new("verification-proxy-invalid", "verification", false)
+                })?;
+                builder = builder.proxy(proxy);
+            }
+        }
+        builder.build().map_err(|_| {
+            DeliveryRuntimeError::new("verification-client-build", "verification", false)
+        })
+    }
+}
+
 struct ProductionVerificationProbe {
     client: Client,
+    proxy: VerificationProxy,
     codex_home: PathBuf,
     app_health_verified: bool,
     #[cfg(test)]
@@ -582,16 +636,11 @@ struct ProductionVerificationProbe {
 
 impl ProductionVerificationProbe {
     fn new(codex_home: PathBuf, app_health_verified: bool) -> Result<Self, DeliveryRuntimeError> {
-        let client = Client::builder()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(NETWORK_TIMEOUT)
-            .redirect(RedirectPolicy::none())
-            .build()
-            .map_err(|_| {
-                DeliveryRuntimeError::new("verification-client-build", "verification", false)
-            })?;
+        let proxy = VerificationProxy::from_settings()?;
+        let client = proxy.build_http_client()?;
         Ok(Self {
             client,
+            proxy,
             codex_home,
             app_health_verified,
             #[cfg(test)]
@@ -607,17 +656,11 @@ impl ProductionVerificationProbe {
 
     #[cfg(test)]
     fn loopback_for_test(codex_home: PathBuf, api_key: &str) -> Result<Self, DeliveryRuntimeError> {
-        let client = Client::builder()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(NETWORK_TIMEOUT)
-            .redirect(RedirectPolicy::none())
-            .no_proxy()
-            .build()
-            .map_err(|_| {
-                DeliveryRuntimeError::new("verification-client-build", "verification", false)
-            })?;
+        let proxy = VerificationProxy::Direct;
+        let client = proxy.build_http_client()?;
         Ok(Self {
             client,
+            proxy,
             codex_home,
             app_health_verified: true,
             api_key_override: None,
@@ -779,7 +822,7 @@ impl VerificationProbe for ProductionVerificationProbe {
 
     fn websocket(&mut self, request: &VerificationRequest) -> Result<StreamProof, ProbeError> {
         let mut key = self.api_key(request)?;
-        let result = websocket_probe(request, key.as_str());
+        let result = websocket_probe(request, key.as_str(), &self.proxy);
         key.zeroize();
         result
     }
@@ -888,9 +931,312 @@ fn parse_sse(response: Response) -> Result<StreamProof, ProbeError> {
     })
 }
 
+trait BlockingNetworkStream: Read + Write {}
+impl<T: Read + Write> BlockingNetworkStream for T {}
+
+struct ResolvedWebSocketProxy {
+    endpoint: Url,
+    basic_authorization: Option<Zeroizing<String>>,
+    username: Option<Zeroizing<String>>,
+    password: Option<Zeroizing<String>>,
+}
+
+fn resolve_websocket_proxy(
+    mode: &VerificationProxy,
+    endpoint: &Url,
+) -> Result<Option<ResolvedWebSocketProxy>, ProbeError> {
+    match mode {
+        VerificationProxy::Direct => Ok(None),
+        VerificationProxy::Custom(url) => Ok(Some(ResolvedWebSocketProxy {
+            endpoint: url.clone(),
+            basic_authorization: None,
+            username: None,
+            password: None,
+        })),
+        VerificationProxy::System => {
+            let mut proxy_target = endpoint.clone();
+            proxy_target
+                .set_scheme(if endpoint.scheme() == "wss" {
+                    "https"
+                } else {
+                    "http"
+                })
+                .map_err(|_| probe_error("verification-websocket-origin", false))?;
+            let target_uri = proxy_target
+                .as_str()
+                .parse::<tungstenite::http::Uri>()
+                .map_err(|_| probe_error("verification-websocket-origin", false))?;
+            let matcher = hyper_util::client::proxy::matcher::Matcher::from_system();
+            let Some(intercept) = matcher.intercept(&target_uri) else {
+                return Ok(None);
+            };
+            let proxy_url = Url::parse(&intercept.uri().to_string())
+                .map_err(|_| probe_error("verification-websocket-proxy", false))?;
+            let basic_authorization = intercept
+                .basic_auth()
+                .and_then(|value| value.to_str().ok())
+                .map(|value| Zeroizing::new(value.to_string()));
+            let (username, password) = intercept
+                .raw_auth()
+                .map(|(username, password)| {
+                    (
+                        Some(Zeroizing::new(username.to_string())),
+                        Some(Zeroizing::new(password.to_string())),
+                    )
+                })
+                .unwrap_or((None, None));
+            Ok(Some(ResolvedWebSocketProxy {
+                endpoint: proxy_url,
+                basic_authorization,
+                username,
+                password,
+            }))
+        }
+    }
+}
+
+fn connect_tcp(host: &str, port: u16, error_code: &str) -> Result<TcpStream, ProbeError> {
+    let addresses = (host, port)
+        .to_socket_addrs()
+        .map_err(|_| probe_error("verification-websocket-dns", true))?;
+    let mut last_error = None;
+    for address in addresses.take(8) {
+        match TcpStream::connect_timeout(&address, CONNECT_TIMEOUT) {
+            Ok(stream) => {
+                stream
+                    .set_read_timeout(Some(NETWORK_TIMEOUT))
+                    .and_then(|()| stream.set_write_timeout(Some(NETWORK_TIMEOUT)))
+                    .map_err(|_| probe_error("verification-websocket-timeout", true))?;
+                return Ok(stream);
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+    let _ = last_error;
+    Err(probe_error(error_code, true))
+}
+
+fn endpoint_host_port(endpoint: &Url, default_port: u16) -> Result<(&str, u16), ProbeError> {
+    let host = endpoint
+        .host_str()
+        .ok_or_else(|| probe_error("verification-websocket-origin", false))?;
+    Ok((host, endpoint.port().unwrap_or(default_port)))
+}
+
+fn connect_http_proxy(
+    proxy: &ResolvedWebSocketProxy,
+    target: &Url,
+) -> Result<Box<dyn BlockingNetworkStream + Send>, ProbeError> {
+    let default_port = if proxy.endpoint.scheme() == "https" {
+        443
+    } else {
+        80
+    };
+    let (proxy_host, proxy_port) = endpoint_host_port(&proxy.endpoint, default_port)?;
+    let tcp = connect_tcp(
+        proxy_host,
+        proxy_port,
+        "verification-websocket-proxy-connect",
+    )?;
+    let mut stream: Box<dyn BlockingNetworkStream + Send> = if proxy.endpoint.scheme() == "https" {
+        let connector = native_tls::TlsConnector::builder()
+            .build()
+            .map_err(|_| probe_error("verification-websocket-proxy-tls", true))?;
+        let tls = connector
+            .connect(proxy_host, tcp)
+            .map_err(|_| probe_error("verification-websocket-proxy-tls", true))?;
+        Box::new(tls)
+    } else {
+        Box::new(tcp)
+    };
+    let (target_host, target_port) =
+        endpoint_host_port(target, if target.scheme() == "wss" { 443 } else { 80 })?;
+    let authority = if target_host.contains(':') {
+        format!("[{target_host}]:{target_port}")
+    } else {
+        format!("{target_host}:{target_port}")
+    };
+    let mut request = format!(
+        "CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\nProxy-Connection: Keep-Alive\r\n"
+    );
+    if let Some(authorization) = proxy.basic_authorization.as_ref() {
+        request.push_str("Proxy-Authorization: ");
+        request.push_str(authorization.as_str());
+        request.push_str("\r\n");
+    }
+    request.push_str("\r\n");
+    stream
+        .write_all(request.as_bytes())
+        .and_then(|()| stream.flush())
+        .map_err(|_| probe_error("verification-websocket-proxy-write", true))?;
+    let mut response = Vec::with_capacity(1024);
+    let mut byte = [0_u8; 1];
+    while response.len() < 32 * 1024 && !response.ends_with(b"\r\n\r\n") {
+        stream
+            .read_exact(&mut byte)
+            .map_err(|_| probe_error("verification-websocket-proxy-read", true))?;
+        response.push(byte[0]);
+    }
+    if !response.ends_with(b"\r\n\r\n") {
+        return Err(probe_error("verification-websocket-proxy-response", false));
+    }
+    let status_line = response
+        .split(|byte| *byte == b'\n')
+        .next()
+        .and_then(|line| std::str::from_utf8(line).ok())
+        .unwrap_or_default();
+    if status_line.split_ascii_whitespace().nth(1) != Some("200") {
+        return Err(probe_error("verification-websocket-proxy-rejected", true));
+    }
+    Ok(stream)
+}
+
+fn socks5_destination(target: &Url, remote_dns: bool) -> Result<Vec<u8>, ProbeError> {
+    let (host, port) = endpoint_host_port(target, if target.scheme() == "wss" { 443 } else { 80 })?;
+    let mut destination = Vec::new();
+    if remote_dns {
+        let bytes = host.as_bytes();
+        if bytes.is_empty() || bytes.len() > u8::MAX as usize {
+            return Err(probe_error("verification-websocket-proxy-host", false));
+        }
+        destination.push(3);
+        destination.push(bytes.len() as u8);
+        destination.extend_from_slice(bytes);
+    } else {
+        let address = (host, port)
+            .to_socket_addrs()
+            .map_err(|_| probe_error("verification-websocket-dns", true))?
+            .next()
+            .ok_or_else(|| probe_error("verification-websocket-dns", true))?;
+        match address.ip() {
+            std::net::IpAddr::V4(ip) => {
+                destination.push(1);
+                destination.extend_from_slice(&ip.octets());
+            }
+            std::net::IpAddr::V6(ip) => {
+                destination.push(4);
+                destination.extend_from_slice(&ip.octets());
+            }
+        }
+    }
+    destination.extend_from_slice(&port.to_be_bytes());
+    Ok(destination)
+}
+
+fn connect_socks5_proxy(
+    proxy: &ResolvedWebSocketProxy,
+    target: &Url,
+    remote_dns: bool,
+) -> Result<Box<dyn BlockingNetworkStream + Send>, ProbeError> {
+    let (proxy_host, proxy_port) = endpoint_host_port(&proxy.endpoint, 1080)?;
+    let mut stream = connect_tcp(
+        proxy_host,
+        proxy_port,
+        "verification-websocket-proxy-connect",
+    )?;
+    let has_credentials = proxy.username.is_some();
+    let greeting: &[u8] = if has_credentials {
+        &[5, 2, 0, 2]
+    } else {
+        &[5, 1, 0]
+    };
+    stream
+        .write_all(greeting)
+        .map_err(|_| probe_error("verification-websocket-proxy-write", true))?;
+    let mut method = [0_u8; 2];
+    stream
+        .read_exact(&mut method)
+        .map_err(|_| probe_error("verification-websocket-proxy-read", true))?;
+    if method[0] != 5 || method[1] == 0xff {
+        return Err(probe_error("verification-websocket-proxy-auth", false));
+    }
+    if method[1] == 2 {
+        let username = proxy
+            .username
+            .as_ref()
+            .map(|value| value.as_str())
+            .unwrap_or_default()
+            .as_bytes();
+        let password = proxy
+            .password
+            .as_ref()
+            .map(|value| value.as_str())
+            .unwrap_or_default()
+            .as_bytes();
+        if username.is_empty() || username.len() > 255 || password.len() > 255 {
+            return Err(probe_error("verification-websocket-proxy-auth", false));
+        }
+        let mut auth = Vec::with_capacity(username.len() + password.len() + 3);
+        auth.extend_from_slice(&[1, username.len() as u8]);
+        auth.extend_from_slice(username);
+        auth.push(password.len() as u8);
+        auth.extend_from_slice(password);
+        stream
+            .write_all(&auth)
+            .map_err(|_| probe_error("verification-websocket-proxy-write", true))?;
+        let mut reply = [0_u8; 2];
+        stream
+            .read_exact(&mut reply)
+            .map_err(|_| probe_error("verification-websocket-proxy-read", true))?;
+        if reply != [1, 0] {
+            return Err(probe_error("verification-websocket-proxy-auth", false));
+        }
+    } else if method[1] != 0 {
+        return Err(probe_error("verification-websocket-proxy-auth", false));
+    }
+    let mut connect = vec![5, 1, 0];
+    connect.extend_from_slice(&socks5_destination(target, remote_dns)?);
+    stream
+        .write_all(&connect)
+        .map_err(|_| probe_error("verification-websocket-proxy-write", true))?;
+    let mut header = [0_u8; 4];
+    stream
+        .read_exact(&mut header)
+        .map_err(|_| probe_error("verification-websocket-proxy-read", true))?;
+    if header[0] != 5 || header[1] != 0 {
+        return Err(probe_error("verification-websocket-proxy-rejected", true));
+    }
+    let address_length = match header[3] {
+        1 => 4,
+        4 => 16,
+        3 => {
+            let mut length = [0_u8; 1];
+            stream
+                .read_exact(&mut length)
+                .map_err(|_| probe_error("verification-websocket-proxy-read", true))?;
+            length[0] as usize
+        }
+        _ => return Err(probe_error("verification-websocket-proxy-response", false)),
+    };
+    let mut address_and_port = vec![0_u8; address_length + 2];
+    stream
+        .read_exact(&mut address_and_port)
+        .map_err(|_| probe_error("verification-websocket-proxy-read", true))?;
+    Ok(Box::new(stream))
+}
+
+fn websocket_transport(
+    endpoint: &Url,
+    mode: &VerificationProxy,
+) -> Result<Box<dyn BlockingNetworkStream + Send>, ProbeError> {
+    let Some(proxy) = resolve_websocket_proxy(mode, endpoint)? else {
+        let (host, port) =
+            endpoint_host_port(endpoint, if endpoint.scheme() == "wss" { 443 } else { 80 })?;
+        return connect_tcp(host, port, "verification-websocket-connect")
+            .map(|stream| Box::new(stream) as Box<dyn BlockingNetworkStream + Send>);
+    };
+    match proxy.endpoint.scheme() {
+        "http" | "https" => connect_http_proxy(&proxy, endpoint),
+        "socks5" => connect_socks5_proxy(&proxy, endpoint, false),
+        "socks5h" => connect_socks5_proxy(&proxy, endpoint, true),
+        _ => Err(probe_error("verification-websocket-proxy-scheme", false)),
+    }
+}
+
 fn websocket_probe(
     request: &VerificationRequest,
     api_key: &str,
+    proxy: &VerificationProxy,
 ) -> Result<StreamProof, ProbeError> {
     let mut endpoint = Url::parse(request.expected_api_origin.trim_end_matches('/'))
         .map_err(|_| probe_error("verification-websocket-origin", false))?;
@@ -907,34 +1253,7 @@ fn websocket_probe(
     ));
     endpoint.set_query(None);
     endpoint.set_fragment(None);
-    let host = endpoint
-        .host_str()
-        .ok_or_else(|| probe_error("verification-websocket-origin", false))?;
-    let port = endpoint
-        .port_or_known_default()
-        .ok_or_else(|| probe_error("verification-websocket-origin", false))?;
-    let addresses = (host, port)
-        .to_socket_addrs()
-        .map_err(|_| probe_error("verification-websocket-dns", true))?;
-    let mut last_error = None;
-    let mut stream = None;
-    for address in addresses.take(8) {
-        match TcpStream::connect_timeout(&address, CONNECT_TIMEOUT) {
-            Ok(value) => {
-                stream = Some(value);
-                break;
-            }
-            Err(error) => last_error = Some(error),
-        }
-    }
-    let stream = stream.ok_or_else(|| {
-        let _ = last_error;
-        probe_error("verification-websocket-connect", true)
-    })?;
-    stream
-        .set_read_timeout(Some(NETWORK_TIMEOUT))
-        .and_then(|()| stream.set_write_timeout(Some(NETWORK_TIMEOUT)))
-        .map_err(|_| probe_error("verification-websocket-timeout", true))?;
+    let stream = websocket_transport(&endpoint, proxy)?;
     let mut ws_request = endpoint
         .as_str()
         .into_client_request()
@@ -1088,7 +1407,6 @@ fn now_unix() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write as _;
     use std::net::TcpListener;
     use std::thread;
 
@@ -1386,10 +1704,92 @@ mod tests {
             let _ = socket.close(None);
         });
         let request = verification_request(format!("http://{address}/v1"));
-        let proof = websocket_probe(&request, "test-api-key").unwrap();
+        let proof = websocket_probe(&request, "test-api-key", &VerificationProxy::Direct).unwrap();
         assert!(proof.completed);
         assert_eq!(proof.model, "gpt-test");
         assert_eq!(proof.output_text, "provider-v4-marker");
         server.join().unwrap();
+    }
+
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn loopback_websocket_verifier_tunnels_through_custom_http_proxy() {
+        let destination_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let destination_address = destination_listener.local_addr().unwrap();
+        let destination = thread::spawn(move || {
+            let (stream, _) = destination_listener.accept().unwrap();
+            let mut socket = tungstenite::accept_hdr(
+                stream,
+                |request: &tungstenite::handshake::server::Request, response| {
+                    assert_eq!(
+                        request
+                            .headers()
+                            .get("authorization")
+                            .and_then(|value| value.to_str().ok()),
+                        Some("Bearer test-api-key")
+                    );
+                    Ok(response)
+                },
+            )
+            .unwrap();
+            let request = socket.read().unwrap();
+            let Message::Text(request) = request else {
+                panic!("expected text request")
+            };
+            assert_eq!(
+                serde_json::from_str::<Value>(request.as_str()).unwrap()["type"],
+                "response.create"
+            );
+            for event in [
+                serde_json::json!({"type":"response.created","response":{"model":"gpt-test"}}),
+                serde_json::json!({"type":"response.output_text.delta","delta":"provider-v4-marker"}),
+                serde_json::json!({"type":"response.completed","response":{"model":"gpt-test"}}),
+            ] {
+                socket
+                    .send(Message::Text(event.to_string().into()))
+                    .unwrap();
+            }
+            let _ = socket.close(None);
+        });
+
+        let proxy_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy_address = proxy_listener.local_addr().unwrap();
+        let proxy = thread::spawn(move || {
+            let (mut client, _) = proxy_listener.accept().unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut connect_request = Vec::new();
+            let mut byte = [0_u8; 1];
+            while connect_request.len() < 32 * 1024 && !connect_request.ends_with(b"\r\n\r\n") {
+                client.read_exact(&mut byte).unwrap();
+                connect_request.push(byte[0]);
+            }
+            let connect_request = String::from_utf8(connect_request).unwrap();
+            assert!(
+                connect_request.starts_with(&format!("CONNECT {destination_address} HTTP/1.1\r\n"))
+            );
+            let mut upstream = TcpStream::connect(destination_address).unwrap();
+            client
+                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                .unwrap();
+            let mut client_reader = client.try_clone().unwrap();
+            let mut upstream_writer = upstream.try_clone().unwrap();
+            let outbound = thread::spawn(move || {
+                let _ = std::io::copy(&mut client_reader, &mut upstream_writer);
+            });
+            let _ = std::io::copy(&mut upstream, &mut client);
+            outbound.join().unwrap();
+        });
+
+        let request = verification_request(format!("http://{destination_address}/v1"));
+        let proxy_mode = VerificationProxy::Custom(
+            Url::parse(&format!("http://{proxy_address}")).expect("loopback proxy URL must parse"),
+        );
+        let proof = websocket_probe(&request, "test-api-key", &proxy_mode).unwrap();
+        assert!(proof.completed);
+        assert_eq!(proof.output_text, "provider-v4-marker");
+        proxy.join().unwrap();
+        destination.join().unwrap();
     }
 }

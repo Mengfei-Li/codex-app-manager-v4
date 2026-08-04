@@ -30,6 +30,8 @@ directories = "6.0.0"
 fs4 = "1.1"
 log = "0.4"
 reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "rustls", "socks", "system-proxy"] }
+hyper-util = { version = "0.1.20", features = ["client-proxy-system"] }
+native-tls = "0.2.16"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.11"
