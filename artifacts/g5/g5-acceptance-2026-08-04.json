@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "gate": "G5",
+  "status": "passed",
+  "repository": "Mengfei-Li/codex-app-manager-v4",
+  "commit": "b7cd09085c8ea0aa3457b922536074da9dd90ba9",
+  "workflow": {
+    "name": "G5 capability and fault matrix",
+    "run_id": 30865112415,
+    "url": "https://github.com/Mengfei-Li/codex-app-manager-v4/actions/runs/30865112415",
+    "conclusion": "success"
+  },
+  "jobs": [
+    {
+      "id": 91855184760,
+      "name": "Stable boundary and reproducible frontend",
+      "conclusion": "success"
+    },
+    {
+      "id": 91855184785,
+      "name": "Production dependency audit",
+      "conclusion": "success"
+    },
+    {
+      "id": 91855184793,
+      "name": "windows-x64",
+      "conclusion": "success"
+    },
+    {
+      "id": 91855184808,
+      "name": "windows-arm64",
+      "conclusion": "success"
+    },
+    {
+      "id": 91855184799,
+      "name": "macos-x64",
+      "conclusion": "success"
+    },
+    {
+      "id": 91855184791,
+      "name": "macos-arm64",
+      "conclusion": "success"
+    }
+  ],
+  "artifacts": [
+    {
+      "id": 8876160594,
+      "name": "g5-native-macos-x64",
+      "sha256": "b03e8df57cdc5c9a2536af4a8708538f40b2a19476117136904148b2ba86c54d"
+    },
+    {
+      "id": 8876090078,
+      "name": "g5-native-macos-arm64",
+      "sha256": "a57179d3235536db1193c0969b1e482bd561943fce03cafb28630457fc2e952b"
+    },
+    {
+      "id": 8875977348,
+      "name": "g5-native-windows-arm64",
+      "sha256": "e6aba9fab7c0cc1604200716444c9ba193156bdcbe1fda63301bf33e1468382d"
+    },
+    {
+      "id": 8875917776,
+      "name": "g5-native-windows-x64",
+      "sha256": "2517b3c5615989fa234bc830b58ac9a1b4e09918411490a0d54fdf9f7ab374e0"
+    },
+    {
+      "id": 8875806158,
+      "name": "g5-source-contract",
+      "sha256": "a84762b49f2d8c4f87b4d52c944614c7f3679e9dc7e337817ab190f374f9fd10"
+    }
+  ],
+  "capability_ids": [
+    "V2-SUP-012",
+    "V2-DIAG-015",
+    "V2-QA-001",
+    "V2-QA-003",
+    "V2-QA-004",
+    "V2-QA-009",
+    "V2-QA-010"
+  ],
+  "assertions": {
+    "all_six_jobs_passed": true,
+    "four_native_architectures_passed": true,
+    "macos_urlsession_loopback_probe_passed": true,
+    "windows_resilience_matrix_passed": true,
+    "stable_canary_isolated": true,
+    "frontend_reproducible": true,
+    "production_dependencies_high_or_critical": 0,
+    "skipped_required_tests": 0,
+    "production_changed": false
+  },
+  "release_policy_sha256": "94cc41839253cb5236f7f4ec0ee22ee4b4bbb387a4072eece851752c064be3ba",
+  "cargo_lock_sha256": "125c526b2684f2e8cd3d4d292556bac65a412cba5c7da38eb19169ff675688c1",
+  "package_lock_sha256": "564e44ec54b07c4dcc8dd26ff650133e89417d6d74724d38c4c55e768843662d"
+}
