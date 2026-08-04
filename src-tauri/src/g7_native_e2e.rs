@@ -351,29 +351,6 @@ pub fn spawn_if_requested(app: AppHandle) {
     });
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{safe_code, valid_release_tag};
-
-    #[test]
-    fn activation_identity_syntax_is_strict() {
-        assert!(valid_release_tag("v4.0.0"));
-        assert!(!valid_release_tag("v4.0"));
-        assert!(!valid_release_tag("4.0.0"));
-        assert!(!valid_release_tag("v4.0.0-rc1"));
-    }
-
-    #[test]
-    fn failure_evidence_codes_cannot_contain_paths_or_secrets() {
-        assert_eq!(safe_code("bootstrap-invalid"), "bootstrap-invalid");
-        assert_eq!(
-            safe_code("C:\\Users\\alice\\sk-secret"),
-            "CUsersalicesk-secret"
-        );
-        assert_eq!(safe_code(""), "g7-failed");
-    }
-}
-
 #[cfg(target_os = "macos")]
 async fn native_flow(app: &AppHandle, checks: &mut LifecycleChecks) -> Result<(), Failure> {
     let first = crate::commands::mac_install(app.clone(), app.state())
@@ -445,4 +422,27 @@ async fn native_flow(app: &AppHandle, checks: &mut LifecycleChecks) -> Result<()
         .map_err(|error| Failure::command("relaunch", error))?;
     checks.relaunch = true;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{safe_code, valid_release_tag};
+
+    #[test]
+    fn activation_identity_syntax_is_strict() {
+        assert!(valid_release_tag("v4.0.0"));
+        assert!(!valid_release_tag("v4.0"));
+        assert!(!valid_release_tag("4.0.0"));
+        assert!(!valid_release_tag("v4.0.0-rc1"));
+    }
+
+    #[test]
+    fn failure_evidence_codes_cannot_contain_paths_or_secrets() {
+        assert_eq!(safe_code("bootstrap-invalid"), "bootstrap-invalid");
+        assert_eq!(
+            safe_code("C:\\Users\\alice\\sk-secret"),
+            "CUsersalicesk-secret"
+        );
+        assert_eq!(safe_code(""), "g7-failed");
+    }
 }
