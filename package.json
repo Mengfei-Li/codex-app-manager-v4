@@ -15,7 +15,7 @@
     "check": "tsc --noEmit",
     "lint": "eslint . --max-warnings=0",
     "test": "vitest run",
-    "test:release": "vitest run scripts/mirror-release.test.mjs scripts/release-workflow.test.mjs",
+    "test:release": "vitest run scripts/mirror-release.test.mjs scripts/release-workflow.test.mjs scripts/validate-g6-native-evidence.test.mjs scripts/g6-disaster-evidence.test.mjs",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",

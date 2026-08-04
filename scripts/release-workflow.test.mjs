@@ -855,6 +855,7 @@ describe("release workflow recovery invariants", () => {
 
     expect(sourceStep).toContain("gh release download");
     expect(sourceStep).toContain("--pattern 'CodexAppManager*'");
+    expect(sourceStep).toContain("--pattern 'g6-*.json'");
     expect(sourceStep).toContain("--pattern 'latest.json'");
     expect(sourceStep).toContain("--pattern 'release-binding.json'");
     expect(sourceStep).toContain('actual_digest="sha256:$(sha256sum "$file"');
@@ -876,5 +877,70 @@ describe("release workflow recovery invariants", () => {
     expect(existingStep).toContain("--predicate-type");
     expect(existingStep).toContain("release-binding.mjs attestation");
     expect(existingStep).toContain("--deny-self-hosted-runners");
+  });
+
+  it("binds all signed native G6 records before immutable publication", () => {
+    const collect = workflow.indexOf("- name: Collect artifacts");
+    const upload = workflow.indexOf(
+      "uses: actions/upload-artifact@",
+      collect,
+    );
+    const buildEvidence = workflow.slice(collect, upload);
+    expect(buildEvidence).toContain("write-g6-windows-evidence.ps1");
+    expect(buildEvidence).toContain("write-g6-macos-evidence.sh");
+    expect(buildEvidence).toContain("$env:RELEASE_SOURCE_SHA");
+    expect(buildEvidence).toContain("$RELEASE_SOURCE_SHA");
+
+    const aggregate = releaseJob.indexOf(
+      "- name: Validate and bind four-architecture G6 native evidence",
+    );
+    const finalValidation = releaseJob.indexOf(
+      "- name: Validate final release artifacts",
+    );
+    expect(aggregate).toBeGreaterThan(-1);
+    expect(finalValidation).toBeGreaterThan(aggregate);
+    const aggregateStep = releaseJob.slice(aggregate, finalValidation);
+    for (const target of [
+      "aarch64-apple-darwin",
+      "x86_64-apple-darwin",
+      "aarch64-pc-windows-msvc",
+      "x86_64-pc-windows-msvc",
+    ]) {
+      expect(aggregateStep).toContain(`dist/g6-${target}.json`);
+    }
+    const validationStep = releaseJob.slice(
+      finalValidation,
+      releaseJob.indexOf("- name: Generate updater manifest"),
+    );
+    expect(validationStep).toContain('require "g6-aggregate.json"');
+    expect(validationStep).toContain('require "g6-disaster-recovery.json"');
+  });
+
+  it("runs and selects an isolated disaster-recovery gate for fresh releases", () => {
+    const disasterStart = workflow.indexOf("  g6_disaster_drill:\n");
+    const selectStart = workflow.indexOf("  select_artifacts:\n");
+    expect(disasterStart).toBeGreaterThan(-1);
+    expect(selectStart).toBeGreaterThan(disasterStart);
+    const disaster = workflow.slice(disasterStart, selectStart);
+    expect(disaster).toContain("npm run test:release");
+    expect(disaster).toContain("cargo test --manifest-path src-tauri/Cargo.toml --lib");
+    expect(disaster).toContain("g6-disaster-evidence.mjs write");
+
+    const selectEnd = workflow.indexOf("  release:\n");
+    const select = workflow.slice(selectStart, selectEnd);
+    expect(select).toContain('candidate="g6-disaster-${GITHUB_RUN_ID}-${attempt}"');
+    expect(select).toContain("no canonical G6 disaster-recovery evidence");
+
+    const validate = releaseJob.indexOf(
+      "- name: Validate isolated G6 disaster-recovery evidence",
+    );
+    const finalValidation = releaseJob.indexOf(
+      "- name: Validate final release artifacts",
+    );
+    expect(validate).toBeGreaterThan(-1);
+    expect(finalValidation).toBeGreaterThan(validate);
+    expect(releaseJob.slice(validate, finalValidation)).toContain(
+      "g6-disaster-evidence.mjs verify",
+    );
   });
 });

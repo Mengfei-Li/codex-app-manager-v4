@@ -637,6 +637,42 @@ jobs:
           fi
           echo "::endgroup::"
 
+      - name: Write immutable Windows G6 native evidence
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $target = "${{ matrix.target }}"
+          $setup = Get-ChildItem "$env:GITHUB_WORKSPACE/dist-artifacts/*-setup.exe" -ErrorAction Stop
+          if ($setup.Count -ne 1) {
+            throw "G6 requires exactly one final Windows installer for $target"
+          }
+          & .\scripts\write-g6-windows-evidence.ps1 `
+            -Installer $setup.FullName `
+            -Target $target `
+            -Commit $env:RELEASE_SOURCE_SHA `
+            -ReleaseTag $env:RELEASE_TAG `
+            -RunId $env:GITHUB_RUN_ID `
+            -ExpectedSubject $env:WINDOWS_SIGNING_SUBJECT `
+            -Output "$env:GITHUB_WORKSPACE/dist-artifacts/g6-$target.json"
+
+      - name: Write immutable macOS G6 native evidence
+        if: matrix.os == 'macos'
+        shell: bash
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          target="${{ matrix.target }}"
+          arch="${target%%-*}"
+          dmg="$GITHUB_WORKSPACE/dist-artifacts/CodexAppManager_${arch}.dmg"
+          bash scripts/write-g6-macos-evidence.sh \
+            "$dmg" \
+            "$target" \
+            "$RELEASE_SOURCE_SHA" \
+            "$RELEASE_TAG" \
+            "$GITHUB_RUN_ID" \
+            "$APPLE_TEAM_ID" \
+            "$GITHUB_WORKSPACE/dist-artifacts/g6-$target.json"
+
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: bundle-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -648,12 +684,63 @@ jobs:
         shell: pwsh
         run: .\scripts\cleanup-windows-signing.ps1
 
+  g6_disaster_drill:
+    needs: [preflight, prepare]
+    if: ${{ needs.prepare.result == 'success' && needs.prepare.outputs.release_reusable != 'true' && needs.preflight.outputs.trusted_invocation == 'tag-signal' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.release_source_sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.16.0
+          cache: npm
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: 1.97.1
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: src-tauri -> target
+      - name: Re-check isolated drill source
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RELEASE_SOURCE_SHA: ${{ needs.prepare.outputs.release_source_sha }}
+        run: |
+          [[ "$(git rev-parse HEAD)" == "$RELEASE_SOURCE_SHA" ]]
+          node scripts/check-release-version.mjs source "$RELEASE_TAG" .
+          bash scripts/check-release-source-ancestor.sh . "$RELEASE_SOURCE_SHA" "$DEFAULT_BRANCH"
+      - run: npm ci
+      - name: Execute isolated release and recovery fault suites
+        run: |
+          npm run test:release
+          cargo test --manifest-path src-tauri/Cargo.toml --lib -- --test-threads=1
+      - name: Write immutable disaster-recovery evidence
+        env:
+          RELEASE_SOURCE_SHA: ${{ needs.prepare.outputs.release_source_sha }}
+        run: |
+          mkdir -p g6-disaster-artifact
+          node scripts/g6-disaster-evidence.mjs write \
+            g6-disaster-artifact/g6-disaster-recovery.json \
+            "$RELEASE_TAG" \
+            "$RELEASE_SOURCE_SHA" \
+            "$GITHUB_RUN_ID"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g6-disaster-${{ github.run_id }}-${{ github.run_attempt }}
+          path: g6-disaster-artifact/g6-disaster-recovery.json
+          if-no-files-found: error
+
   # Signing and notarization are intentionally non-deterministic. Keep every
   # successful matrix artifact under an attempt-qualified name, then select the
   # earliest successful artifact for each target. A release/stage rerun therefore
   # reuses the exact first bytes instead of creating a second immutable payload.
   select_artifacts:
-    needs: [prepare, build]
+    needs: [prepare, build, g6_disaster_drill]
     if: ${{ always() && needs.prepare.result == 'success' }}
     runs-on: ubuntu-24.04
     permissions:
@@ -706,13 +793,26 @@ jobs:
             echo "::error::no complete canonical release artifact set exists for this run"
             exit 1
           }
+          disaster_selected=""
+          for attempt in $(seq 1 "$GITHUB_RUN_ATTEMPT"); do
+            candidate="g6-disaster-${GITHUB_RUN_ID}-${attempt}"
+            if grep -Fxq "$candidate" "$RUNNER_TEMP/run-artifacts.txt"; then
+              disaster_selected="$candidate"
+              break
+            fi
+          done
+          [[ -n "$disaster_selected" ]] || {
+            echo "::error::no canonical G6 disaster-recovery evidence exists for this run"
+            exit 1
+          }
+          echo "$disaster_selected" >> "$names_file"
           artifact_names="$(jq -Rsc 'split("\n") | map(select(length > 0))' "$names_file")"
           echo "artifact_names=$artifact_names" >> "$GITHUB_OUTPUT"
           echo "Canonical artifacts: $artifact_names"
 
   release:
     if: ${{ always() && needs.preflight.result == 'success' && needs.prepare.result == 'success' && needs.select_artifacts.result == 'success' }}
-    needs: [preflight, prepare, build, select_artifacts]
+    needs: [preflight, prepare, build, g6_disaster_drill, select_artifacts]
     # All mirror credentials live only in the default-branch-restricted release
     # environment. Never duplicate them as repository or organization secrets.
     environment: release
@@ -903,6 +1003,7 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --dir "$published" \
               --pattern 'CodexAppManager*' \
+              --pattern 'g6-*.json' \
               --pattern 'latest.json' \
               --pattern 'release-binding.json'
             test -f "$published/latest.json" || {
@@ -940,9 +1041,39 @@ jobs:
               echo "::error::no build artifacts are available for new release $RELEASE_TAG"
               exit 1
             }
-            echo "existing=false" >> "$GITHUB_OUTPUT"
-            echo "source=canonical-actions-artifacts" >> "$GITHUB_OUTPUT"
+             echo "existing=false" >> "$GITHUB_OUTPUT"
+             echo "source=canonical-actions-artifacts" >> "$GITHUB_OUTPUT"
+           fi
+
+      - name: Validate and bind four-architecture G6 native evidence
+        shell: bash
+        run: |
+          expected_run_id="$GITHUB_RUN_ID"
+          if [[ "${{ steps.release_source.outputs.existing }}" == "true" ]]; then
+            expected_run_id="auto"
           fi
+          node scripts/validate-g6-native-evidence.mjs \
+            "$RELEASE_TAG" \
+            "$RELEASE_SOURCE_SHA" \
+            "$expected_run_id" \
+            dist/g6-aggregate.json \
+            dist/g6-aarch64-apple-darwin.json \
+            dist/g6-x86_64-apple-darwin.json \
+            dist/g6-aarch64-pc-windows-msvc.json \
+            dist/g6-x86_64-pc-windows-msvc.json
+
+      - name: Validate isolated G6 disaster-recovery evidence
+        shell: bash
+        run: |
+          expected_run_id="$GITHUB_RUN_ID"
+          if [[ "${{ steps.release_source.outputs.existing }}" == "true" ]]; then
+            expected_run_id="auto"
+          fi
+          node scripts/g6-disaster-evidence.mjs verify \
+            dist/g6-disaster-recovery.json \
+            "$RELEASE_TAG" \
+            "$RELEASE_SOURCE_SHA" \
+            "$expected_run_id"
 
       # Validate the merged *publishable* tree (renamed final names), not the
       # per-target intermediate build directories from the matrix jobs.
@@ -983,6 +1114,12 @@ jobs:
           require "*arm64*-setup.exe"
           require "*x64*-setup.exe.sig"
           require "*arm64*-setup.exe.sig"
+          require "g6-aarch64-apple-darwin.json"
+          require "g6-x86_64-apple-darwin.json"
+          require "g6-aarch64-pc-windows-msvc.json"
+          require "g6-x86_64-pc-windows-msvc.json"
+          require "g6-aggregate.json"
+          require "g6-disaster-recovery.json"
           if [ "$missing" -ne 0 ]; then
             echo "::error::[build] final artifact validation failed"
             exit 1
