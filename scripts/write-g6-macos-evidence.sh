@@ -8,9 +8,10 @@ RELEASE_TAG="${4:-}"
 RUN_ID="${5:-}"
 EXPECTED_TEAM_ID="${6:-}"
 OUTPUT="${7:-}"
+SMOKE_EVIDENCE="${8:-}"
 
-[[ -f "$DMG" && -n "$OUTPUT" && -n "$EXPECTED_TEAM_ID" ]] || {
-  echo "usage: $0 DMG TARGET COMMIT RELEASE_TAG RUN_ID TEAM_ID OUTPUT" >&2
+[[ -f "$DMG" && -f "$SMOKE_EVIDENCE" && -n "$OUTPUT" && -n "$EXPECTED_TEAM_ID" ]] || {
+  echo "usage: $0 DMG TARGET COMMIT RELEASE_TAG RUN_ID TEAM_ID OUTPUT SMOKE_EVIDENCE" >&2
   exit 2
 }
 [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "invalid release commit" >&2; exit 2; }
@@ -64,6 +65,7 @@ export G6_DMG="$DMG" G6_TARGET="$TARGET" G6_COMMIT="$COMMIT"
 export G6_RELEASE_TAG="$RELEASE_TAG" G6_RUN_ID="$RUN_ID"
 export G6_EXPECTED_ARCH="$EXPECTED_ARCH" G6_RUNNER_ARCH="$RUNNER_ARCH"
 export G6_TEAM_ID="$TEAM_ID" G6_AUTHORITY="$AUTHORITY" G6_OUTPUT="$OUTPUT"
+export G6_SMOKE_EVIDENCE="$SMOKE_EVIDENCE"
 python3 - <<'PY'
 import hashlib
 import json
@@ -72,6 +74,22 @@ from pathlib import Path
 
 dmg = Path(os.environ["G6_DMG"])
 output = Path(os.environ["G6_OUTPUT"])
+smoke_path = Path(os.environ["G6_SMOKE_EVIDENCE"])
+smoke = json.loads(smoke_path.read_text(encoding="utf-8"))
+dmg_sha256 = hashlib.file_digest(dmg.open("rb"), "sha256").hexdigest()
+if (
+    smoke.get("schema_version") != 1
+    or smoke.get("status") != "passed"
+    or smoke.get("platform") != "macos"
+    or smoke.get("runner_architecture") != os.environ["G6_EXPECTED_ARCH"]
+    or smoke.get("artifact_sha256") != dmg_sha256
+    or smoke.get("developer_id_team") != os.environ["G6_TEAM_ID"]
+    or smoke.get("production_side_effects") is not False
+    or not all(smoke.get("lifecycle", {}).get(name) is True for name in (
+        "mount", "copy", "launch", "quarantine_launch"
+    ))
+):
+    raise SystemExit("G6 macOS lifecycle receipt is invalid or not bound to this artifact")
 evidence = {
     "schema_version": 1,
     "gate": "G6",
@@ -86,7 +104,7 @@ evidence = {
     "artifact": {
         "name": dmg.name,
         "size": dmg.stat().st_size,
-        "sha256": hashlib.file_digest(dmg.open("rb"), "sha256").hexdigest(),
+        "sha256": dmg_sha256,
     },
     "developer_id": {
         "authority": os.environ["G6_AUTHORITY"],
@@ -96,12 +114,8 @@ evidence = {
         "gatekeeper": True,
         "hardened_runtime": True,
     },
-    "lifecycle": {
-        "mount": True,
-        "copy": True,
-        "launch": True,
-        "quarantine_launch": True,
-    },
+    "lifecycle": smoke["lifecycle"],
+    "lifecycle_receipt_sha256": hashlib.file_digest(smoke_path.open("rb"), "sha256").hexdigest(),
     "production_side_effects": False,
 }
 output.parent.mkdir(parents=True, exist_ok=True)

@@ -502,7 +502,11 @@ jobs:
           DMG="$(find "src-tauri/target/${{ matrix.target }}/release/bundle/dmg" -maxdepth 1 -name '*.dmg' | head -1)"
           EXPECTED_ARCH="${{ matrix.target }}"
           EXPECTED_ARCH="${EXPECTED_ARCH%%-*}"
-          bash scripts/macos-signed-release-smoke.sh "$DMG" "$EXPECTED_ARCH" "$APPLE_TEAM_ID"
+          bash scripts/macos-signed-release-smoke.sh \
+            "$DMG" \
+            "$EXPECTED_ARCH" \
+            "$APPLE_TEAM_ID" \
+            "$RUNNER_TEMP/g6-macos-smoke-${{ matrix.target }}.json"
 
       # ── Windows: PE architecture diagnostic on native x64/ARM64 runners ───
       #    Hard-assert the main PE machine type (0xAA64 / 0x8664). The NSIS
@@ -552,12 +556,14 @@ jobs:
         if: matrix.os == 'windows'
         shell: pwsh
         run: |
+          $target = "${{ matrix.target }}"
           $setup = Get-ChildItem "src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*-setup.exe" -ErrorAction Stop
           & .\scripts\windows-packaged-smoke.ps1 `
             -Installer $setup.FullName `
             -AuthenticodeMode required `
             -ExpectedAuthenticodeSubject $env:WINDOWS_SIGNING_SUBJECT `
-            -RequireTimestamp
+            -RequireTimestamp `
+            -EvidenceOutput "$env:RUNNER_TEMP\g6-windows-smoke-$target.json"
 
       # ── Windows: sign the NSIS installer for the updater ──────────────────
       #    Authenticode establishes Windows publisher identity. The separate
@@ -653,6 +659,7 @@ jobs:
             -ReleaseTag $env:RELEASE_TAG `
             -RunId $env:GITHUB_RUN_ID `
             -ExpectedSubject $env:WINDOWS_SIGNING_SUBJECT `
+            -SmokeEvidence "$env:RUNNER_TEMP\g6-windows-smoke-$target.json" `
             -Output "$env:GITHUB_WORKSPACE/dist-artifacts/g6-$target.json"
 
       - name: Write immutable macOS G6 native evidence
@@ -671,7 +678,8 @@ jobs:
             "$RELEASE_TAG" \
             "$GITHUB_RUN_ID" \
             "$APPLE_TEAM_ID" \
-            "$GITHUB_WORKSPACE/dist-artifacts/g6-$target.json"
+            "$GITHUB_WORKSPACE/dist-artifacts/g6-$target.json" \
+            "$RUNNER_TEMP/g6-macos-smoke-${{ matrix.target }}.json"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:

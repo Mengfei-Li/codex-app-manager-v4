@@ -28,7 +28,9 @@ param(
 
     [string]$ExpectedAuthenticodeSubject = "",
 
-    [switch]$RequireTimestamp
+    [switch]$RequireTimestamp,
+
+    [string]$EvidenceOutput = ""
 )
 
 Set-StrictMode -Version Latest
@@ -92,6 +94,11 @@ $verifyScript = Join-Path $scriptRoot "verify-windows-authenticode.ps1"
 $didInstall = $false
 $smokeFailed = $false
 $smokeError = $null
+$installPassed = $false
+$launchPassed = $false
+$upgradePassed = $false
+$uninstallPassed = $false
+$signatureReverifiedAfterInstall = $false
 
 Write-Host "Installer: $($installerItem.FullName)"
 Write-Host "InstallDir: $installDir"
@@ -133,6 +140,7 @@ try {
     $vi = (Get-Item -LiteralPath $mainExe).VersionInfo
     Write-Host "[install] FileVersion=$($vi.FileVersion) ProductVersion=$($vi.ProductVersion)"
     Write-Host "[install] installed PE size=$((Get-Item -LiteralPath $mainExe).Length) bytes"
+    $installPassed = $true
     Close-Stage
 
     # ── sign-verify (installed PE) ──────────────────────────────────────────
@@ -144,6 +152,9 @@ try {
             -ExpectedSubject $ExpectedAuthenticodeSubject `
             -RequireTimestamp:$RequireTimestamp `
             -Stage "sign-verify"
+        if ($AuthenticodeMode -eq "required") {
+            $signatureReverifiedAfterInstall = $true
+        }
         Close-Stage
     }
 
@@ -160,6 +171,9 @@ try {
         if ($proc.ExitCode -ne 0) {
             Fail-Stage "launch" "process exited early with code $($proc.ExitCode)"
         }
+        if ($EvidenceOutput) {
+            Fail-Stage "launch" "process exited during the G6 sustained-launch observation"
+        }
         Write-Host "::warning::[launch] process exited during observe window with code 0 — treating as soft pass"
     }
     else {
@@ -169,6 +183,7 @@ try {
     }
     # Ensure nothing leftover holds files open for upgrade.
     Stop-AppProcesses $MainBinaryName
+    $launchPassed = $true
     Close-Stage
 
     # ── upgrade ─────────────────────────────────────────────────────────────
@@ -183,6 +198,7 @@ try {
         Fail-Stage "upgrade" "uninstaller missing after upgrade: $uninstaller"
     }
     Write-Host "[upgrade] post-upgrade PE size=$((Get-Item -LiteralPath $mainExe).Length) bytes"
+    $upgradePassed = $true
     Close-Stage
 
     # ── uninstall (happy path) ──────────────────────────────────────────────
@@ -199,6 +215,7 @@ try {
     }
     Write-Host "[uninstall] main executable removed"
     $didInstall = $false
+    $uninstallPassed = $true
     Close-Stage
 
     Write-Host "Packaged lifecycle smoke passed: install → launch → upgrade → uninstall"
@@ -225,6 +242,38 @@ finally {
 
 if ($smokeFailed) {
     throw $smokeError
+}
+
+if ($EvidenceOutput) {
+    if ($AuthenticodeMode -ne "required" -or -not $RequireTimestamp) {
+        throw "G6 smoke evidence requires mandatory Authenticode and timestamp verification"
+    }
+    if (-not ($installPassed -and $launchPassed -and $upgradePassed -and $uninstallPassed -and $signatureReverifiedAfterInstall)) {
+        throw "G6 smoke evidence cannot be written for an incomplete lifecycle"
+    }
+    $receipt = [ordered]@{
+        schema_version = 1
+        status = "passed"
+        platform = "windows"
+        runner_architecture = $env:PROCESSOR_ARCHITECTURE
+        artifact_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $installerItem.FullName).Hash.ToLowerInvariant()
+        lifecycle = [ordered]@{
+            install = $installPassed
+            launch = $launchPassed
+            upgrade = $upgradePassed
+            uninstall = $uninstallPassed
+            signature_reverified_after_install = $signatureReverifiedAfterInstall
+        }
+        production_side_effects = $false
+    }
+    $evidencePath = [IO.Path]::GetFullPath($EvidenceOutput)
+    New-Item -ItemType Directory -Path (Split-Path -Parent $evidencePath) -Force | Out-Null
+    [IO.File]::WriteAllText(
+        $evidencePath,
+        (($receipt | ConvertTo-Json -Depth 6) + "`n"),
+        [Text.UTF8Encoding]::new($false)
+    )
+    Write-Host "G6 Windows lifecycle receipt written: $evidencePath"
 }
 
 # Do not `exit` — CI invokes this in-process with `&`.

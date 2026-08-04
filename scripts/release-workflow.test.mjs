@@ -888,6 +888,10 @@ describe("release workflow recovery invariants", () => {
     const buildEvidence = workflow.slice(collect, upload);
     expect(buildEvidence).toContain("write-g6-windows-evidence.ps1");
     expect(buildEvidence).toContain("write-g6-macos-evidence.sh");
+    expect(buildEvidence).toContain("-SmokeEvidence");
+    expect(buildEvidence).toContain("g6-macos-smoke-");
+    expect(workflow).toContain("-EvidenceOutput");
+    expect(workflow).toContain("macos-signed-release-smoke.sh");
     expect(buildEvidence).toContain("$env:RELEASE_SOURCE_SHA");
     expect(buildEvidence).toContain("$RELEASE_SOURCE_SHA");
 

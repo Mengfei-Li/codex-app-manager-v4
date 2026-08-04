@@ -18,10 +18,17 @@ function record(target) {
     release_commit: commit,
     release_run_id: run,
     artifact: { name: `${target}.bin`, size: 10, sha256: "b".repeat(64) },
+    lifecycle_receipt_sha256: "c".repeat(64),
     ...(windows
       ? {
           authenticode: { status: "Valid", signer_subject: "CN=Provider", timestamp_subject: "CN=TSA" },
-          lifecycle: { install: true, launch: true, upgrade: true, uninstall: true },
+          lifecycle: {
+            install: true,
+            launch: true,
+            upgrade: true,
+            uninstall: true,
+            signature_reverified_after_install: true,
+          },
         }
       : {
           developer_id: { team_id: "TEAM123456", notarized: true, stapled: true, gatekeeper: true, hardened_runtime: true },
@@ -58,5 +65,18 @@ describe("G6 native evidence", () => {
     const mac = REQUIRED_TARGETS.map(record);
     mac[0].developer_id.notarized = false;
     expect(() => validateG6Evidence(mac, tag, commit, run)).toThrow("notarized missing");
+  });
+
+  it("rejects an unbound or incomplete lifecycle receipt", () => {
+    const unbound = REQUIRED_TARGETS.map(record);
+    unbound[0].lifecycle_receipt_sha256 = "";
+    expect(() => validateG6Evidence(unbound, tag, commit, run)).toThrow(
+      "lifecycle receipt hash missing",
+    );
+    const incomplete = REQUIRED_TARGETS.map(record);
+    incomplete[2].lifecycle.signature_reverified_after_install = false;
+    expect(() => validateG6Evidence(incomplete, tag, commit, run)).toThrow(
+      "signature_reverified_after_install missing",
+    );
   });
 });

@@ -13,6 +13,8 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$ExpectedSubject,
     [Parameter(Mandatory = $true)]
+    [string]$SmokeEvidence,
+    [Parameter(Mandatory = $true)]
     [string]$Output
 )
 
@@ -32,6 +34,19 @@ if ($env:PROCESSOR_ARCHITECTURE -ne $expectedNative) {
 }
 
 $item = Get-Item -LiteralPath $Installer -ErrorAction Stop
+$artifactSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $item.FullName).Hash.ToLowerInvariant()
+$smoke = Get-Content -LiteralPath $SmokeEvidence -Raw -Encoding UTF8 | ConvertFrom-Json
+if ($smoke.schema_version -ne 1 -or $smoke.status -ne 'passed' -or $smoke.platform -ne 'windows') {
+    throw "invalid G6 Windows lifecycle receipt"
+}
+if ($smoke.runner_architecture -ne $expectedNative -or $smoke.artifact_sha256 -ne $artifactSha256) {
+    throw "G6 Windows lifecycle receipt is not bound to this native artifact"
+}
+$requiredLifecycle = @('install', 'launch', 'upgrade', 'uninstall', 'signature_reverified_after_install')
+foreach ($name in $requiredLifecycle) {
+    if ($smoke.lifecycle.$name -ne $true) { throw "G6 Windows lifecycle receipt missing $name" }
+}
+if ($smoke.production_side_effects -ne $false) { throw "G6 Windows lifecycle touched production" }
 & "$PSScriptRoot\verify-windows-authenticode.ps1" `
     -Path @($item.FullName) `
     -Mode required `
@@ -61,7 +76,7 @@ $evidence = [ordered]@{
     artifact = [ordered]@{
         name = $item.Name
         size = [int64]$item.Length
-        sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $item.FullName).Hash.ToLowerInvariant()
+        sha256 = $artifactSha256
     }
     authenticode = [ordered]@{
         status = [string]$signature.Status
@@ -71,13 +86,8 @@ $evidence = [ordered]@{
         timestamp_subject = $signature.TimeStamperCertificate.Subject
         timestamp_thumbprint = $signature.TimeStamperCertificate.Thumbprint.ToLowerInvariant()
     }
-    lifecycle = [ordered]@{
-        install = $true
-        launch = $true
-        upgrade = $true
-        uninstall = $true
-        signature_reverified_after_install = $true
-    }
+    lifecycle = $smoke.lifecycle
+    lifecycle_receipt_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $SmokeEvidence).Hash.ToLowerInvariant()
     production_side_effects = $false
 }
 

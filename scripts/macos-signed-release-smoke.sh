@@ -5,8 +5,9 @@ set -euo pipefail
 DMG="${1:-}"
 EXPECTED_ARCH="${2:-}"
 EXPECTED_TEAM_ID="${3:-}"
+EVIDENCE_OUTPUT="${4:-}"
 [[ -f "$DMG" && -n "$EXPECTED_ARCH" && -n "$EXPECTED_TEAM_ID" ]] || {
-  echo "usage: $0 DMG EXPECTED_ARCH EXPECTED_TEAM_ID" >&2
+  echo "usage: $0 DMG EXPECTED_ARCH EXPECTED_TEAM_ID [EVIDENCE_OUTPUT]" >&2
   exit 2
 }
 
@@ -68,3 +69,37 @@ kill -0 "$pid" 2>/dev/null || { echo "signed release app exited during observati
 kill "$pid" 2>/dev/null || true
 rm -rf -- "$DATA_DIR"
 echo "macOS signed release smoke passed: arch=$EXPECTED_ARCH team=$TEAM_ID"
+
+if [[ -n "$EVIDENCE_OUTPUT" ]]; then
+  export G6_SMOKE_DMG="$DMG" G6_SMOKE_ARCH="$EXPECTED_ARCH"
+  export G6_SMOKE_TEAM="$TEAM_ID" G6_SMOKE_OUTPUT="$EVIDENCE_OUTPUT"
+  python3 - <<'PY'
+import hashlib
+import json
+import os
+from pathlib import Path
+
+dmg = Path(os.environ["G6_SMOKE_DMG"])
+output = Path(os.environ["G6_SMOKE_OUTPUT"])
+receipt = {
+    "schema_version": 1,
+    "status": "passed",
+    "platform": "macos",
+    "runner_architecture": os.uname().machine,
+    "artifact_sha256": hashlib.file_digest(dmg.open("rb"), "sha256").hexdigest(),
+    "developer_id_team": os.environ["G6_SMOKE_TEAM"],
+    "lifecycle": {
+        "mount": True,
+        "copy": True,
+        "launch": True,
+        "quarantine_launch": True,
+    },
+    "production_side_effects": False,
+}
+if receipt["runner_architecture"] != os.environ["G6_SMOKE_ARCH"]:
+    raise SystemExit("G6 smoke receipt architecture mismatch")
+output.parent.mkdir(parents=True, exist_ok=True)
+output.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+print(f"G6 macOS lifecycle receipt written: {output}")
+PY
+fi

@@ -24,6 +24,7 @@ function stableEvidence(evidence) {
     platform: evidence.platform,
     artifact: evidence.artifact,
     native_runner: evidence.native_runner,
+    lifecycle_receipt_sha256: evidence.lifecycle_receipt_sha256,
     ...(evidence.platform === "windows"
       ? { authenticode: evidence.authenticode, lifecycle: evidence.lifecycle }
       : { developer_id: evidence.developer_id, lifecycle: evidence.lifecycle }),
@@ -50,19 +51,30 @@ export function validateG6Evidence(records, expectedTag, expectedCommit, expecte
     assert(record.production_side_effects === false, `${record.target}: unexpected production side effect`);
     assert(record.artifact && SHA256.test(record.artifact.sha256), `${record.target}: artifact hash missing`);
     assert(Number.isSafeInteger(record.artifact.size) && record.artifact.size > 0, `${record.target}: artifact size invalid`);
+    assert(SHA256.test(record.lifecycle_receipt_sha256), `${record.target}: lifecycle receipt hash missing`);
     if (record.platform === "windows") {
       assert(record.target.endsWith("pc-windows-msvc"), `${record.target}: platform mismatch`);
       assert(record.authenticode?.status === "Valid", `${record.target}: Authenticode invalid`);
       assert(record.authenticode?.signer_subject, `${record.target}: signer subject missing`);
       assert(record.authenticode?.timestamp_subject, `${record.target}: timestamp missing`);
-      assert(Object.values(record.lifecycle || {}).every((value) => value === true), `${record.target}: Windows lifecycle incomplete`);
+      for (const name of [
+        "install",
+        "launch",
+        "upgrade",
+        "uninstall",
+        "signature_reverified_after_install",
+      ]) {
+        assert(record.lifecycle?.[name] === true, `${record.target}: Windows lifecycle ${name} missing`);
+      }
     } else {
       assert(record.platform === "macos" && record.target.endsWith("apple-darwin"), `${record.target}: platform mismatch`);
       assert(record.developer_id?.team_id, `${record.target}: Developer ID team missing`);
       for (const name of ["notarized", "stapled", "gatekeeper", "hardened_runtime"]) {
         assert(record.developer_id?.[name] === true, `${record.target}: ${name} missing`);
       }
-      assert(Object.values(record.lifecycle || {}).every((value) => value === true), `${record.target}: macOS lifecycle incomplete`);
+      for (const name of ["mount", "copy", "launch", "quarantine_launch"]) {
+        assert(record.lifecycle?.[name] === true, `${record.target}: macOS lifecycle ${name} missing`);
+      }
     }
     byTarget.set(record.target, record);
   }
