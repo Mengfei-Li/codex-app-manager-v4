@@ -1,20 +1,23 @@
 name: Release
 
 # Default-branch, tag-signalled cross-platform release:
-#   build (unsigned) → macOS finalize (adaptive icon + inside-out Developer ID
-#   sign + notarize + staple + repackage updater/dmg) → collect → publish a
+#   inject audited policy -> build with mandatory platform identity -> validate
+#   native install/launch/upgrade/uninstall -> collect -> publish a
 #   GitHub Release with the Tauri updater manifest (latest.json).
 #
 # Required `release` environment secrets (never repository/org secrets):
 #   APPLE_CERTIFICATE            base64 of your "Developer ID Application" .p12
 #   APPLE_CERTIFICATE_PASSWORD   password for that .p12
 #   APPLE_SIGNING_IDENTITY       "Developer ID Application: NAME (TEAMID)"
+#   APPLE_TEAM_ID                exact approved Developer ID team identifier
 #   KEYCHAIN_PASSWORD            any throwaway password for the temp keychain
 #   AC_API_KEY_ID                App Store Connect API key id
 #   AC_API_ISSUER_ID             App Store Connect issuer id
 #   AC_API_KEY_BASE64            base64 of the AuthKey_XXXX.p8
 #   TAURI_SIGNING_PRIVATE_KEY            updater private key (string)
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD   its password (empty if none)
+#   WINDOWS_CERTIFICATE                  base64 production Authenticode PFX
+#   WINDOWS_CERTIFICATE_PASSWORD         password for that PFX
 #   IMMUTABLE_RELEASES_READ_TOKEN         fine-grained token with repository
 #                                           Administration: read-only
 #   MANAGER_R2_S3_ENDPOINT / MANAGER_R2_PROMOTION_ACCESS_KEY_ID /
@@ -25,6 +28,9 @@ name: Release
 #   MANAGER_IHEP_S3_PROMOTION_ACCESS_KEY_ID /
 #     MANAGER_IHEP_S3_PROMOTION_SECRET_ACCESS_KEY
 #                                           IHEP S3-compatible read/write access
+# Required `release` environment variables:
+#   WINDOWS_EXPECTED_PUBLISHER_SUBJECT    exact approved certificate Subject
+#   WINDOWS_TIMESTAMP_URL                 HTTPS RFC3161 timestamp service
 # Both mirror backends are required for stable publication and must already
 # contain a valid latest.json baseline. R2 is the sole CAS authority and must
 # enforce conditional PutObject plus HeadObject metadata round trips. IHEP is an
@@ -42,10 +48,9 @@ name: Release
 # The old MANAGER_*_ACCESS_KEY_ID / SECRET_ACCESS_KEY names must stay deleted;
 # otherwise a historical workflow revision could still perform unconditional writes.
 #
-# Optional Windows Authenticode (non-blocking until configured; see docs/windows-signing.md):
+# Required Windows Authenticode identity (G6/G8 production gate):
 #   WINDOWS_CERTIFICATE          base64 of OV/EV code-signing .pfx
 #   WINDOWS_CERTIFICATE_PASSWORD password for that .pfx
-#   vars.AUTHENTICODE_REQUIRED   set to "true" to fail release when PE is unsigned
 #   vars.WINDOWS_TIMESTAMP_URL   optional RFC3161 timestamp URL override
 
 on:
@@ -76,8 +81,8 @@ permissions:
   contents: read
 
 env:
-  AUTHORIZED_RELEASE_ACTOR_LOGIN: Wangnov
-  AUTHORIZED_RELEASE_ACTOR_ID: "48670012"
+  AUTHORIZED_RELEASE_ACTOR_LOGIN: Mengfei-Li
+  AUTHORIZED_RELEASE_ACTOR_ID: "42709601"
   RELEASE_TAG: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || inputs.target_tag }}
   RELEASE_SOURCE_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || '' }}
   TRUSTED_RELEASE_INVOCATION: ${{ github.event_name == 'workflow_run' && 'tag-signal' || 'manual-recovery' }}
@@ -327,7 +332,7 @@ jobs:
               os: windows,
             }
           - {
-              platform: windows-2025,
+              platform: windows-11-arm,
               target: aarch64-pc-windows-msvc,
               os: windows,
             }
@@ -391,6 +396,21 @@ jobs:
 
       - run: npm ci
 
+      - name: Inject audited V4 production release policy
+        shell: bash
+        run: node scripts/inject-v4-release-policy.mjs
+
+      - name: Prepare mandatory Windows inside-out signing
+        id: windows_signing
+        if: matrix.os == 'windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_EXPECTED_PUBLISHER_SUBJECT: ${{ vars.WINDOWS_EXPECTED_PUBLISHER_SUBJECT }}
+          WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+        run: .\scripts\prepare-windows-signing.ps1
+
       # ── macOS: vendor the Sparkle BinaryDelta helper BEFORE the build so it
       #    ships in Resources/. Without it the manager can't apply deltas and
       #    every macOS update silently falls back to the full-package download
@@ -417,16 +437,25 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KC"
           security list-keychains -d user -s "$KC" $(security list-keychains -d user | sed s/\"//g)
 
-      # ── Build WITHOUT a tauri signingIdentity; we sign inside-out after ────
-      - name: Build (Tauri, unsigned)
+      # macOS is finalized inside-out after bundling. Windows is signed during
+      # Tauri bundling via the one-run certificateThumbprint merge config.
+      - name: Build Tauri candidate
         shell: bash
         # Bundling downloads toolchains on the fly (e.g. the NSIS archive from
         # GitHub) which occasionally 504s and fails the whole release. Retry a
         # few times so a transient download hiccup doesn't sink the run — cargo
         # output is cached, so a retry mostly just re-runs the bundling step.
         run: |
+          extra_config=()
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            [ -f "$TAURI_WINDOWS_SIGNING_CONFIG" ] || {
+              echo "::error::mandatory Windows signing config is missing"
+              exit 1
+            }
+            extra_config=(--config "$TAURI_WINDOWS_SIGNING_CONFIG")
+          fi
           for attempt in 1 2 3; do
-            npm run tauri build -- --target ${{ matrix.target }} && exit 0
+            npm run tauri build -- --target ${{ matrix.target }} "${extra_config[@]}" && exit 0
             echo "::warning::tauri build attempt ${attempt} failed (often a transient NSIS/toolchain download, e.g. HTTP 504) — retrying in 20s"
             sleep 20
           done
@@ -456,6 +485,8 @@ jobs:
           AC_API_KEY_ID: ${{ secrets.AC_API_KEY_ID }}
           AC_API_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
           AC_API_KEY_BASE64: ${{ secrets.AC_API_KEY_BASE64 }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          CAM_REQUIRE_NOTARIZATION: "1"
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
@@ -463,12 +494,20 @@ jobs:
           export AC_API_KEY="$RUNNER_TEMP/AuthKey.p8"
           bash scripts/finalize-macos.sh "${{ matrix.target }}"
 
-      # ── Windows: PE architecture diagnostic (especially ARM64 cross-build) ─
-      #    windows-2025 is x64; aarch64-pc-windows-msvc is cross-compiled.
+      - name: macOS native signed and notarized lifecycle
+        if: matrix.os == 'macos'
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          DMG="$(find "src-tauri/target/${{ matrix.target }}/release/bundle/dmg" -maxdepth 1 -name '*.dmg' | head -1)"
+          EXPECTED_ARCH="${{ matrix.target }}"
+          EXPECTED_ARCH="${EXPECTED_ARCH%%-*}"
+          bash scripts/macos-signed-release-smoke.sh "$DMG" "$EXPECTED_ARCH" "$APPLE_TEAM_ID"
+
+      # ── Windows: PE architecture diagnostic on native x64/ARM64 runners ───
       #    Hard-assert the main PE machine type (0xAA64 / 0x8664). The NSIS
       #    outer -setup.exe is an x86/x64 stub that embeds the payload, so we
       #    assert machine type on the app binary, not the setup wrapper.
-      #    Cross-compilation ≠ runtime verification. See docs/windows-signing.md.
       #    Invoke scripts in-process (`& .\scripts\…`); nested `pwsh -File` breaks
       #    array parameter binding for -Path on GitHub-hosted Windows runners.
       - name: Windows PE architecture diagnostic
@@ -490,44 +529,41 @@ jobs:
             & .\scripts\windows-pe-arch.ps1 -Path @($setup | ForEach-Object { $_.FullName })
           }
           if ($target -like "aarch64-*") {
-            Write-Host "::notice::ARM64 main PE asserted machine=0xAA64 (cross-build on x64). Full install/launch smoke remains x64-only until ARM64 runners or trusted virtualization is available."
+            if ($env:PROCESSOR_ARCHITECTURE -ne "ARM64") {
+              throw "ARM64 release must run on a native ARM64 runner"
+            }
+            Write-Host "::notice::ARM64 main PE asserted machine=0xAA64 on native ARM64 runner."
           }
 
-      # ── Windows: optional Authenticode (OV/EV) on final NSIS installer ────
-      #    Non-blocking until WINDOWS_CERTIFICATE is configured in the release
-      #    environment. When present, signs the published -setup.exe. Full
-      #    inside-out signing of main binary + uninstaller should eventually
-      #    move into tauri build via certificateThumbprint (docs/windows-signing.md).
-      #    This is independent of the Tauri updater minisign key below.
-      - name: Authenticode-sign Windows installer (optional)
+      - name: Verify mandatory Authenticode before install
         if: matrix.os == 'windows'
         shell: pwsh
-        env:
-          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-          WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
         run: |
           $setup = Get-ChildItem "src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*-setup.exe" -ErrorAction Stop
-          & .\scripts\sign-windows-authenticode.ps1 -Path $setup.FullName -Stage "sign"
-
-      - name: Verify Authenticode on Windows installer
-        if: matrix.os == 'windows'
-        shell: pwsh
-        env:
-          AUTHENTICODE_MODE: ${{ vars.AUTHENTICODE_REQUIRED == 'true' && 'required' || 'optional' }}
-        run: |
-          $setup = Get-ChildItem "src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*-setup.exe" -ErrorAction Stop
+          $main = "src-tauri/target/${{ matrix.target }}/release/codex-app-manager.exe"
           & .\scripts\verify-windows-authenticode.ps1 `
-            -Path $setup.FullName `
-            -Mode $env:AUTHENTICODE_MODE `
+            -Path @($main, $setup.FullName) `
+            -Mode required `
+            -ExpectedSubject $env:WINDOWS_SIGNING_SUBJECT `
+            -RequireTimestamp `
             -Stage "sign-verify"
 
+      - name: Windows native signed lifecycle
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem "src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*-setup.exe" -ErrorAction Stop
+          & .\scripts\windows-packaged-smoke.ps1 `
+            -Installer $setup.FullName `
+            -AuthenticodeMode required `
+            -ExpectedAuthenticodeSubject $env:WINDOWS_SIGNING_SUBJECT `
+            -RequireTimestamp
+
       # ── Windows: sign the NSIS installer for the updater ──────────────────
-      #    The build is intentionally unsigned for Authenticode (until OV/EV is
-      #    configured), so Tauri emits no updater `.sig` during build. In Tauri 2
-      #    the Windows updater ships the `-setup.exe` itself, so signing it here
-      #    with the updater key — exactly what finalize-macos.sh does for the
-      #    .app.tar.gz — is equivalent to `createUpdaterArtifacts` and is what
+      #    Authenticode establishes Windows publisher identity. The separate
+      #    Tauri updater `.sig` below binds the same final installer bytes to the
+      #    application update trust root. In Tauri 2 the Windows updater ships the
+      #    `-setup.exe` itself, so signing it here is what
       #    gets windows-x86_64 and windows-aarch64 into latest.json. Without it
       #    the manifest has macOS platforms only and Windows in-app self-update
       #    never sees new versions.
@@ -606,6 +642,11 @@ jobs:
           name: bundle-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: dist-artifacts/*
           if-no-files-found: error
+
+      - name: Remove ephemeral Windows signing identity
+        if: always() && matrix.os == 'windows'
+        shell: pwsh
+        run: .\scripts\cleanup-windows-signing.ps1
 
   # Signing and notarization are intentionally non-deterministic. Keep every
   # successful matrix artifact under an attempt-qualified name, then select the

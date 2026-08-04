@@ -142,7 +142,30 @@ jobs:
             --directory artifacts/g5/urlsession-source \
             > artifacts/g5/urlsession-server.log 2>&1 &
           server_pid=$!
-          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          cleanup() {
+            status=$?
+            if [[ "$status" -ne 0 ]]; then
+              echo "::group::URLSession fixture server log"
+              cat artifacts/g5/urlsession-server.log || true
+              echo "::endgroup::"
+            fi
+            kill "$server_pid" 2>/dev/null || true
+            exit "$status"
+          }
+          trap cleanup EXIT
+          ready=0
+          for attempt in {1..40}; do
+            if /usr/bin/curl --noproxy '*' --silent --show-error --fail \
+              http://127.0.0.1:48081/payload.bin >/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 0.25
+          done
+          [[ "$ready" -eq 1 ]] || {
+            echo "::error::loopback URLSession fixture did not become ready"
+            exit 1
+          }
           swiftc tests/g5/URLSessionDownloadLifecycleProbe.swift \
             -o artifacts/g5/urlsession-probe
           artifacts/g5/urlsession-probe \

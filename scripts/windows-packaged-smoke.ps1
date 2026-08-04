@@ -24,7 +24,11 @@ param(
     [string]$MainBinaryName = "codex-app-manager",
     [int]$LaunchSeconds = 12,
     [ValidateSet("optional", "required", "skip")]
-    [string]$AuthenticodeMode = "optional"
+    [string]$AuthenticodeMode = "optional",
+
+    [string]$ExpectedAuthenticodeSubject = "",
+
+    [switch]$RequireTimestamp
 )
 
 Set-StrictMode -Version Latest
@@ -97,7 +101,12 @@ try {
     # ── sign-verify (installer artifact, pre-install) ───────────────────────
     if ($AuthenticodeMode -ne "skip" -and (Test-Path $verifyScript)) {
         Write-Stage "sign-verify" "Probe Authenticode on installer ($AuthenticodeMode)"
-        & $verifyScript -Path $installerItem.FullName -Mode $AuthenticodeMode -Stage "sign-verify"
+        & $verifyScript `
+            -Path $installerItem.FullName `
+            -Mode $AuthenticodeMode `
+            -ExpectedSubject $ExpectedAuthenticodeSubject `
+            -RequireTimestamp:$RequireTimestamp `
+            -Stage "sign-verify"
         Close-Stage
     }
 
@@ -129,7 +138,12 @@ try {
     # ── sign-verify (installed PE) ──────────────────────────────────────────
     if ($AuthenticodeMode -ne "skip" -and (Test-Path $verifyScript)) {
         Write-Stage "sign-verify" "Probe Authenticode on installed executable + uninstaller"
-        & $verifyScript -Path @($mainExe, $uninstaller) -Mode $AuthenticodeMode -Stage "sign-verify"
+        & $verifyScript `
+            -Path @($mainExe, $uninstaller) `
+            -Mode $AuthenticodeMode `
+            -ExpectedSubject $ExpectedAuthenticodeSubject `
+            -RequireTimestamp:$RequireTimestamp `
+            -Stage "sign-verify"
         Close-Stage
     }
 

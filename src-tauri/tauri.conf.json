@@ -2,8 +2,8 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Codex App Manager",
   "mainBinaryName": "codex-app-manager",
-  "version": "0.5.1",
-  "identifier": "io.github.wangnov.codexappmanager",
+  "version": "4.0.0",
+  "identifier": "xyz.provider2466335.codexmanager",
   "build": {
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build",
@@ -42,7 +42,7 @@
       "icons/icon.ico"
     ],
     "category": "Utility",
-    "copyright": "Copyright (c) 2026 Wangnov",
+    "copyright": "Copyright (c) 2026 2466335 AI Model",
     "shortDescription": "Codex App mirror install and update manager.",
     "longDescription": "A manager app for installing and updating mirrored official Codex desktop app packages.",
     "targets": ["nsis", "dmg", "app"],
@@ -86,10 +86,10 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDIxQThDQzg4QjlFNjE5QTEKUldTaEdlYTVpTXlvSWNQYVRHMjRNQmtLQ25HdE1aV2FoY0hLSldsZHpHM3NMYkJHMk8zVDR0WDEK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDM1MzdFQUNDQkM5QTlBMjIKUldRaW1wcTh6T28zTlk4SHdEQklxZ2hUWHBDeS9mazYyc0oycTZucFJDR2tqdHRjUFJCOVdMQzgK",
       "endpoints": [
-        "https://codexapp.agentsmirror.com/manager/latest.json",
-        "https://github.com/Wangnov/Codex-App-Manager/releases/latest/download/latest.json"
+        "https://objects.2466335.xyz/v4-manager/latest.json",
+        "https://github.com/Mengfei-Li/codex-app-manager-v4/releases/latest/download/latest.json"
       ]
     }
   }

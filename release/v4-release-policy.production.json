@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "state": "release",
+  "public_key_b64": "5hTffcOOs0xWTDAe5CClQOtxHaRB_Gddy5z4nxBUXhs",
+  "issuer": "provider-codex-v4",
+  "audience": "codex-app-manager",
+  "build_id": "codex-app-manager-v4-4.0.0",
+  "claim_endpoint_id": "customer-portal-v4-claim",
+  "claim_endpoint_url": "https://2466335.xyz/api/bootstrap/v4/claim",
+  "diagnostic_endpoint": "https://2466335.xyz/api/installer/v4/diagnostics/bundles",
+  "allowed_api_origins": [
+    "https://api.2466335.xyz"
+  ]
+}

@@ -25,6 +25,8 @@ param(
     # When set (required mode), SignerCertificate.Subject must contain this.
     [string]$ExpectedSubject = "",
 
+    [switch]$RequireTimestamp,
+
     [string]$Stage = "sign-verify"
 )
 
@@ -66,6 +68,7 @@ foreach ($raw in $Path) {
 
     $sig = Get-AuthenticodeSignature -LiteralPath $item.FullName
     $subject = if ($sig.SignerCertificate) { $sig.SignerCertificate.Subject } else { "" }
+    $timestampSubject = if ($sig.TimeStamperCertificate) { $sig.TimeStamperCertificate.Subject } else { "" }
     $status = [string]$sig.Status
     $ok = $false
 
@@ -91,9 +94,13 @@ foreach ($raw in $Path) {
                 $ok = $false
                 Write-Host "::error::[$Stage] $($item.Name): expected Valid, got $status"
             }
-            elseif ($ExpectedSubject -and ($subject -notlike "*$ExpectedSubject*")) {
+            elseif ($ExpectedSubject -and ($subject -ne $ExpectedSubject)) {
                 $ok = $false
-                Write-Host "::error::[$Stage] $($item.Name): subject '$subject' does not contain '$ExpectedSubject'"
+                Write-Host "::error::[$Stage] $($item.Name): subject '$subject' does not equal '$ExpectedSubject'"
+            }
+            elseif ($RequireTimestamp -and -not $sig.TimeStamperCertificate) {
+                $ok = $false
+                Write-Host "::error::[$Stage] $($item.Name): trusted timestamp is missing"
             }
             else {
                 $ok = $true
@@ -107,10 +114,11 @@ foreach ($raw in $Path) {
         Path    = $item.FullName
         Status  = $status
         Subject = $subject
+        TimestampSubject = $timestampSubject
         Ok      = $ok
     }
 
-    Write-Host ("  {0,-12} {1}  {2}" -f $status, $item.Name, $subject)
+    Write-Host ("  {0,-12} {1}  signer={2} timestamp={3}" -f $status, $item.Name, $subject, $timestampSubject)
 }
 
 $results | Format-Table -AutoSize | Out-String | Write-Host

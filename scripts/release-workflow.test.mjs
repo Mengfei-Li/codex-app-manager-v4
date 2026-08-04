@@ -47,6 +47,56 @@ const mirrorRelease = await readFile(
 const releaseJob = workflow.slice(workflow.indexOf("  release:\n"));
 
 describe("release workflow recovery invariants", () => {
+  it("requires real platform identities and validates native signed lifecycles", () => {
+    const build = workflow.slice(
+      workflow.indexOf("  build:\n"),
+      workflow.indexOf("  select_artifacts:\n"),
+    );
+    const signingPrepare = build.slice(
+      build.indexOf("- name: Prepare mandatory Windows inside-out signing"),
+      build.indexOf("- name: Vendor Sparkle BinaryDelta"),
+    );
+    const tauriBuild = build.slice(
+      build.indexOf("- name: Build Tauri candidate"),
+      build.indexOf("- name: Assert BinaryDelta inside the bundle"),
+    );
+    const windowsVerify = build.slice(
+      build.indexOf("- name: Verify mandatory Authenticode before install"),
+      build.indexOf("- name: Sign Windows updater artifact"),
+    );
+    const macFinalize = build.slice(
+      build.indexOf("- name: Finalize macOS bundle"),
+      build.indexOf("- name: Windows PE architecture diagnostic"),
+    );
+
+    expect(build).toContain("platform: windows-11-arm");
+    expect(build).toContain("target: aarch64-pc-windows-msvc");
+    expect(build).toContain("environment: release");
+    expect(build).toContain("node scripts/inject-v4-release-policy.mjs");
+    expect(signingPrepare).toContain(
+      "WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}",
+    );
+    expect(signingPrepare).toContain(
+      "WINDOWS_EXPECTED_PUBLISHER_SUBJECT: ${{ vars.WINDOWS_EXPECTED_PUBLISHER_SUBJECT }}",
+    );
+    expect(signingPrepare).toContain(
+      "WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}",
+    );
+    expect(tauriBuild).toContain('--config "$TAURI_WINDOWS_SIGNING_CONFIG"');
+    expect(windowsVerify).toContain("-Mode required");
+    expect(windowsVerify).toContain(
+      "-ExpectedSubject $env:WINDOWS_SIGNING_SUBJECT",
+    );
+    expect(windowsVerify).toContain("-RequireTimestamp");
+    expect(windowsVerify).toContain("windows-packaged-smoke.ps1");
+    expect(macFinalize).toContain('CAM_REQUIRE_NOTARIZATION: "1"');
+    expect(macFinalize).toContain(
+      "APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}",
+    );
+    expect(macFinalize).toContain("macos-signed-release-smoke.sh");
+    expect(build).not.toContain("AUTHENTICODE_REQUIRED");
+  });
+
   it("queues every release run instead of replacing an older pending tag", () => {
     expect(workflow).toMatch(
       /concurrency:\n\s+group: release-latest-\$\{\{ github\.repository \}\}\n\s+cancel-in-progress: false\n\s+queue: max/,

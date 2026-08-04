@@ -31,6 +31,11 @@ private final class DownloadProbe: NSObject, URLSessionDownloadDelegate {
 
     func download(from source: URL) throws -> URL {
         let configuration = URLSessionConfiguration.ephemeral
+        // The G5 contract is deliberately loopback-only. Do not inherit runner
+        // PAC/HTTP proxy state: a corporate proxy must never intercept or stall
+        // the lifecycle fixture.
+        configuration.connectionProxyDictionary = [:]
+        configuration.waitsForConnectivity = false
         configuration.timeoutIntervalForRequest = 15
         configuration.timeoutIntervalForResource = 60
         session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)

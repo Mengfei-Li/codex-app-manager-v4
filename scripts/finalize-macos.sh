@@ -31,6 +31,9 @@ bash "$ROOT/scripts/macos-adaptive-icon.sh" "$APP"
 bash "$ROOT/scripts/sign-macos-app.sh" "$APP" "${APPLE_SIGNING_IDENTITY:--}"
 if [[ -n "${AC_API_KEY_ID:-}" ]]; then
   bash "$ROOT/scripts/notarize-macos.sh" "$APP"
+elif [[ "${CAM_REQUIRE_NOTARIZATION:-0}" == "1" ]]; then
+  echo "notarization credentials are mandatory for a production release" >&2
+  exit 1
 else
   log "AC_API_* not set — skipping notarization (dev finalize)"
 fi
@@ -61,8 +64,19 @@ if [[ -n "$DMG" ]]; then
   rm -f "$DMG"
   hdiutil convert "$RW" -format UDZO -o "$DMG" >/dev/null
   rm -f "$RW"
-  codesign --force --sign "${APPLE_SIGNING_IDENTITY:--}" "$DMG" 2>/dev/null || true
-  log "dmg repacked (Tauri layout kept, finalized app swapped in): ${DMG##*/}"
+  [[ "${APPLE_SIGNING_IDENTITY:--}" != "-" ]] || {
+    echo "Developer ID identity is mandatory for the release DMG" >&2
+    exit 1
+  }
+  codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$DMG"
+  codesign --verify --strict --verbose=2 "$DMG"
+  if [[ -n "${AC_API_KEY_ID:-}" ]]; then
+    bash "$ROOT/scripts/notarize-macos.sh" "$DMG"
+  elif [[ "${CAM_REQUIRE_NOTARIZATION:-0}" == "1" ]]; then
+    echo "DMG notarization credentials are mandatory for a production release" >&2
+    exit 1
+  fi
+  log "dmg repacked, signed, notarized and stapled: ${DMG##*/}"
 fi
 
 log "done — every macOS artifact now carries the signed, stapled, adaptive-icon app."
